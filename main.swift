@@ -357,7 +357,6 @@ class MainWindowController: NSWindowController, NSWindowDelegate {
 
     private func presentNativeSavePanel(success: @escaping (URL) -> Void, fallback: (() -> Void)? = nil) {
         let savePanel = NSSavePanel()
-        savePanel.allowedContentTypes = [UTType.plainText]
         savePanel.allowsOtherFileTypes = true
         
         guard let window = self.window else {

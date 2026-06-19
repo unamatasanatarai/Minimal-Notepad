@@ -384,15 +384,15 @@ The following are explicitly out of scope:
 
 ## Module: File Operations
 
-| ID   | Requirement                        | Acceptance Criteria            | Edge Cases                             |
-| ---- | ---------------------------------- | ------------------------------ | -------------------------------------- |
-| FO-1 | User can open arbitrary files      | Any filesystem file selectable | Binary files may render poorly         |
-| FO-2 | User can drag-and-drop files       | Dropped file loads into editor | Multiple files open first only         |
-| FO-3 | App shall reject directories       | Error shown for folders        | Symlink resolving to folder rejected   |
-| FO-4 | App shall resolve aliases/symlinks | Target file opened             | Broken symlink shows error             |
-| FO-5 | User can save current document     | File overwritten directly      | Save failures preserve dirty state     |
-| FO-6 | User can Save As                   | Native save dialog appears     | Canceled dialog leaves state unchanged |
-| FO-7 | New files save as UTF-8            | Persisted file encoded UTF-8   | None                                   |
+| ID   | Requirement                        | Acceptance Criteria                                    | Edge Cases                             |
+| ---- | ---------------------------------- | ------------------------------------------------------ | -------------------------------------- |
+| FO-1 | User can open arbitrary files      | Any filesystem file selectable                         | Binary files may render poorly         |
+| FO-2 | User can drag-and-drop files       | Dropped file loads into editor                         | Multiple files open first only         |
+| FO-3 | App shall reject directories       | Error shown for folders                                | Symlink resolving to folder rejected   |
+| FO-4 | App shall resolve aliases/symlinks | Target file opened                                     | Broken symlink shows error             |
+| FO-5 | User can save current document     | File overwritten directly                              | Save failures preserve dirty state     |
+| FO-6 | User can Save As                   | Native save dialog appears allowing any file extension | Canceled dialog leaves state unchanged |
+| FO-7 | New files save as UTF-8            | Persisted file encoded UTF-8                           | None                                   |
 
 ---
 
