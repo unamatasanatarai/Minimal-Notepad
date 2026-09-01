@@ -79,7 +79,7 @@ $(BUILD_DIR)/$(APP_NAME): icons $(SWIFT_FILES)
 	@echo '</dict>' >> "$(CONTENTS_DIR)/Info.plist"
 	@echo '</plist>' >> "$(CONTENTS_DIR)/Info.plist"
 	@echo "Build successful: $(BUILD_DIR)/$(APP_NAME)"
-	@touch build/Minimal\ Notepad.app
+	@touch "$(BUILD_DIR)/$(APP_NAME)"
 
 run: all
 	open "$(BUILD_DIR)/$(APP_NAME)"
@@ -88,6 +88,7 @@ clean:
 	rm -rf "$(BUILD_DIR)"
 
 icons:
+	@mkdir -p "$(BUILD_DIR)"
 	sips -z 16 16     MinimalNotepad.iconset/icon_512x512@2x.png --out MinimalNotepad.iconset/icon_16x16.png
 	sips -z 32 32     MinimalNotepad.iconset/icon_512x512@2x.png --out MinimalNotepad.iconset/icon_16x16@2x.png
 	sips -z 32 32     MinimalNotepad.iconset/icon_512x512@2x.png --out MinimalNotepad.iconset/icon_32x32.png
@@ -98,4 +99,3 @@ icons:
 	sips -z 512 512   MinimalNotepad.iconset/icon_512x512@2x.png --out MinimalNotepad.iconset/icon_256x256@2x.png
 	sips -z 512 512   MinimalNotepad.iconset/icon_512x512@2x.png --out MinimalNotepad.iconset/icon_512x512.png
 	iconutil -c icns MinimalNotepad.iconset -o AppIcon.icns
-	touch build/Minimal\ Notepad.app

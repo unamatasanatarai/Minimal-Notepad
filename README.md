@@ -88,6 +88,7 @@ open build/"Minimal Notepad.app"
 * `Cmd + O` — Open system file navigation panel
 * `Cmd + S` — Commit internal text storage back to disk via atomic write
 * `Cmd + Shift + S` — Trigger Save As dialog box to duplicate or reposition storage tracking
+* `Cmd + P` — Trigger system print dialog prompt for active document
 * `Cmd + F` — Display inline search and substitution tracking tray interface
 * `Cmd + Q` — Terminate the host application safely
 

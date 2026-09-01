@@ -70,6 +70,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(NSMenuItem(title: "Open...", action: #selector(MainWindowController.menuOpenFile(_:)), keyEquivalent: "o"))
         fileMenu.addItem(NSMenuItem(title: "Save", action: #selector(MainWindowController.menuSaveFile(_:)), keyEquivalent: "s"))
         fileMenu.addItem(NSMenuItem(title: "Save As...", action: #selector(MainWindowController.menuSaveAsFile(_:)), keyEquivalent: "S"))
+        fileMenu.addItem(NSMenuItem.separator())
+        fileMenu.addItem(NSMenuItem(title: "Print...", action: #selector(MainWindowController.menuPrintFile(_:)), keyEquivalent: "p"))
         fileMenuItem.submenu = fileMenu
         
         // Edit Menu
@@ -520,6 +522,18 @@ class MainWindowController: NSWindowController, NSWindowDelegate {
     @objc func menuFind(_ sender: Any?) {
         searchBar.isHidden = false
         searchBar.focusSearchField()
+    }
+
+    @objc func menuPrintFile(_ sender: Any?) {
+        let printInfo = NSPrintInfo.shared
+        let printOperation = NSPrintOperation(view: textView, printInfo: printInfo)
+        printOperation.showsPrintPanel = true
+        printOperation.showsProgressPanel = true
+        if let window = self.window {
+            printOperation.runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
+        } else {
+            printOperation.run()
+        }
     }
 
     // MARK: - Window Delegate
