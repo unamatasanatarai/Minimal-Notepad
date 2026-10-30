@@ -10,6 +10,9 @@ RESOURCES_DIR = $(CONTENTS_DIR)/Resources
 SWIFT_FILES = main.swift
 SWIFT_FLAGS = -O
 
+APP_ICON = Resources/AppIcon.icns
+ICON_SET = Resources/MinimalNotepad.iconset
+
 .PHONY: all clean run icons
 
 all: $(BUILD_DIR)/$(APP_NAME)
@@ -22,9 +25,9 @@ $(BUILD_DIR)/$(APP_NAME): icons $(SWIFT_FILES)
 	@echo "Compiling Swift executable..."
 	swiftc $(SWIFT_FLAGS) $(SWIFT_FILES) -o "$(MACSOS_DIR)/$(PRODUCT_NAME)"
 	
-	@if [ -f AppIcon.icns ]; then \
+	@if [ -f $(APP_ICON) ]; then \
 		echo "Copying application icon..."; \
-		cp AppIcon.icns "$(RESOURCES_DIR)/AppIcon.icns"; \
+		cp $(APP_ICON) "$(RESOURCES_DIR)/AppIcon.icns"; \
 	fi
 	
 	@echo "Generating PkgInfo..."
@@ -55,7 +58,7 @@ $(BUILD_DIR)/$(APP_NAME): icons $(SWIFT_FILES)
 	@echo '    <string>11.0</string>' >> "$(CONTENTS_DIR)/Info.plist"
 	@echo '    <key>NSPrincipalClass</key>' >> "$(CONTENTS_DIR)/Info.plist"
 	@echo '    <string>NSApplication</string>' >> "$(CONTENTS_DIR)/Info.plist"
-	@if [ -f AppIcon.icns ]; then \
+	@if [ -f $(APP_ICON) ]; then \
 		echo '    <key>CFBundleIconFile</key>' >> "$(CONTENTS_DIR)/Info.plist"; \
 		echo '    <string>AppIcon</string>' >> "$(CONTENTS_DIR)/Info.plist"; \
 	fi
@@ -89,13 +92,13 @@ clean:
 
 icons:
 	@mkdir -p "$(BUILD_DIR)"
-	sips -z 16 16     MinimalNotepad.iconset/icon_512x512@2x.png --out MinimalNotepad.iconset/icon_16x16.png
-	sips -z 32 32     MinimalNotepad.iconset/icon_512x512@2x.png --out MinimalNotepad.iconset/icon_16x16@2x.png
-	sips -z 32 32     MinimalNotepad.iconset/icon_512x512@2x.png --out MinimalNotepad.iconset/icon_32x32.png
-	sips -z 64 64     MinimalNotepad.iconset/icon_512x512@2x.png --out MinimalNotepad.iconset/icon_32x32@2x.png
-	sips -z 128 128   MinimalNotepad.iconset/icon_512x512@2x.png --out MinimalNotepad.iconset/icon_128x128.png
-	sips -z 256 256   MinimalNotepad.iconset/icon_512x512@2x.png --out MinimalNotepad.iconset/icon_128x128@2x.png
-	sips -z 256 256   MinimalNotepad.iconset/icon_512x512@2x.png --out MinimalNotepad.iconset/icon_256x256.png
-	sips -z 512 512   MinimalNotepad.iconset/icon_512x512@2x.png --out MinimalNotepad.iconset/icon_256x256@2x.png
-	sips -z 512 512   MinimalNotepad.iconset/icon_512x512@2x.png --out MinimalNotepad.iconset/icon_512x512.png
-	iconutil -c icns MinimalNotepad.iconset -o AppIcon.icns
+	sips -z 16 16     $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_16x16.png
+	sips -z 32 32     $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_16x16@2x.png
+	sips -z 32 32     $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_32x32.png
+	sips -z 64 64     $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_32x32@2x.png
+	sips -z 128 128   $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_128x128.png
+	sips -z 256 256   $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_128x128@2x.png
+	sips -z 256 256   $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_256x256.png
+	sips -z 512 512   $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_256x256@2x.png
+	sips -z 512 512   $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_512x512.png
+	iconutil -c icns $(ICON_SET) -o $(APP_ICON)

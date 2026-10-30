@@ -106,14 +106,28 @@ class MainWindowController: NSWindowController, NSWindowDelegate {
     var searchBar: SearchBarView!
     var containerStackView: NSStackView!
     
-    var currentURL: URL?
+    var currentURL: URL? {
+        didSet {
+            updateWindowTitle()
+        }
+    }
     var isDirty = false {
         didSet {
             self.window?.isDocumentEdited = isDirty
+            updateWindowTitle()
         }
     }
     
     private var baseFileString: String = ""
+
+    func updateWindowTitle() {
+        let filename = currentURL?.lastPathComponent ?? "Untitled"
+        let prefix = isDirty ? "*" : ""
+        let newTitle = "\(prefix)\(filename)"
+        if self.window?.title != newTitle {
+            self.window?.title = newTitle
+        }
+    }
 
     convenience init() {
         let window = NSWindow(
@@ -123,7 +137,6 @@ class MainWindowController: NSWindowController, NSWindowDelegate {
             defer: false
         )
         window.center()
-        window.title = "Untitled"
         
         // Force window to use light mode styling appearance explicitly
         window.appearance = NSAppearance(named: .aqua)
@@ -131,6 +144,7 @@ class MainWindowController: NSWindowController, NSWindowDelegate {
         self.init(window: window)
         window.delegate = self
         setupViews()
+        updateWindowTitle()
     }
 
     private func setupViews() {
@@ -269,7 +283,7 @@ class MainWindowController: NSWindowController, NSWindowDelegate {
             currentURL = resolvedURL
             isDirty = false
             textView.undoManager?.removeAllActions()
-            self.window?.title = resolvedURL.lastPathComponent
+            updateWindowTitle()
         } catch {
             showNativeAlert(title: "Open Failure", message: "An error occurred reading the file resource.")
         }
@@ -300,7 +314,7 @@ class MainWindowController: NSWindowController, NSWindowDelegate {
             currentURL = url
             baseFileString = textView.string
             isDirty = false
-            self.window?.title = url.lastPathComponent
+            updateWindowTitle()
         } catch {
             showNativeAlert(title: "Save Failure", message: "The operation could not be completed on the physical filesystem structure.")
         }
@@ -479,7 +493,7 @@ class MainWindowController: NSWindowController, NSWindowDelegate {
             self?.currentURL = nil
             self?.isDirty = false
             self?.textView.undoManager?.removeAllActions()
-            self?.window?.title = "Untitled"
+            self?.updateWindowTitle()
         }
     }
 
