@@ -36,8 +36,6 @@
             <key>LSItemContentTypes</key>
             <array>
                 <string>public.data</string>
-                <string>public.item</string>
-                <string>public.content</string>
             </array>
         </dict>
     </array>

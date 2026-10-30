@@ -1,7 +1,8 @@
 import AppKit
-import UniformTypeIdentifiers
 
 // MARK: - Main Application Entry Point
+
+let editorFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
 
 let app = NSApplication.shared
 let delegate = AppDelegate()
@@ -11,57 +12,55 @@ app.run()
 // MARK: - Main Application Delegate
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    var windowController: MainWindowController?
+    // Lazy so files delivered via openFiles before launch finishes still have a window.
+    private lazy var windowController = MainWindowController()
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        setupMainMenu()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        setupMainMenu()
-        
-        let controller = MainWindowController()
-        controller.showWindow(nil)
-        self.windowController = controller
+        windowController.showWindow(nil)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         return true
     }
 
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
+        return true
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if let windowController = windowController, windowController.isDirty {
-            windowController.promptForUnsavedChanges { proceed in
-                if proceed {
-                    NSApp.reply(toApplicationShouldTerminate: true)
-                } else {
-                    NSApp.reply(toApplicationShouldTerminate: false)
-                }
-            }
-            return .terminateLater
+        if windowController.window?.attachedSheet != nil { return .terminateCancel }
+        guard windowController.isDirty else { return .terminateNow }
+        windowController.resolveUnsavedChanges { proceed in
+            NSApp.reply(toApplicationShouldTerminate: proceed)
         }
-        return .terminateNow
+        return .terminateLater
     }
 
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
-        guard let firstFile = filenames.first else { return }
-        let url = URL(fileURLWithPath: firstFile)
-        
-        if let windowController = windowController {
-            windowController.handleFileOpen(url: url)
+        if let firstFile = filenames.first, windowController.window?.attachedSheet == nil {
+            windowController.handleFileOpen(url: URL(fileURLWithPath: firstFile))
+            NSApp.reply(toOpenOrPrint: .success)
+        } else {
+            NSApp.reply(toOpenOrPrint: .failure)
         }
-        NSApp.reply(toApplicationShouldTerminate: true)
     }
 
     // MARK: - Menu Setup
 
     private func setupMainMenu() {
         let mainMenu = NSMenu()
-        
+
         // Application Menu
         let appMenuItem = NSMenuItem()
         mainMenu.addItem(appMenuItem)
         let appMenu = NSMenu()
-        let quitItem = NSMenuItem(title: "Quit Minimal Notepad", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        appMenu.addItem(quitItem)
+        appMenu.addItem(NSMenuItem(title: "Quit Minimal Notepad", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         appMenuItem.submenu = appMenu
-        
+
         // File Menu
         let fileMenuItem = NSMenuItem()
         mainMenu.addItem(fileMenuItem)
@@ -73,27 +72,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(NSMenuItem(title: "Print...", action: #selector(MainWindowController.menuPrintFile(_:)), keyEquivalent: "p"))
         fileMenuItem.submenu = fileMenu
-        
+
         // Edit Menu
         let editMenuItem = NSMenuItem()
         mainMenu.addItem(editMenuItem)
         let editMenu = NSMenu(title: "Edit")
-        editMenu.addItem(NSMenuItem(title: "Undo", action: #selector(UndoManager.undo), keyEquivalent: "z"))
-        editMenu.addItem(NSMenuItem(title: "Redo", action: #selector(UndoManager.redo), keyEquivalent: "Z"))
+        editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
+        editMenu.addItem(NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z"))
         editMenu.addItem(NSMenuItem.separator())
-        editMenu.addItem(NSMenuItem(title: "Cut", action: #selector(NSTextView.cut(_:)), keyEquivalent: "x"))
-        editMenu.addItem(NSMenuItem(title: "Copy", action: #selector(NSTextView.copy(_:)), keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
         editMenu.addItem(NSMenuItem(title: "Paste", action: #selector(NSTextView.pasteAsPlainText(_:)), keyEquivalent: "v"))
-        editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSTextView.selectAll(_:)), keyEquivalent: "a"))
+        editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
         editMenuItem.submenu = editMenu
-        
+
         // Find Menu
         let findMenuItem = NSMenuItem()
         mainMenu.addItem(findMenuItem)
         let findMenu = NSMenu(title: "Find")
         findMenu.addItem(NSMenuItem(title: "Find...", action: #selector(MainWindowController.menuFind(_:)), keyEquivalent: "f"))
         findMenuItem.submenu = findMenu
-        
+
         NSApp.mainMenu = mainMenu
     }
 }
@@ -101,32 +100,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - Main Window Controller
 
 class MainWindowController: NSWindowController, NSWindowDelegate {
-    
-    var textView: NSTextView!
-    var searchBar: SearchBarView!
-    var containerStackView: NSStackView!
-    
-    var currentURL: URL? {
-        didSet {
-            updateWindowTitle()
-        }
-    }
-    var isDirty = false {
-        didSet {
-            self.window?.isDocumentEdited = isDirty
-            updateWindowTitle()
-        }
-    }
-    
-    private var baseFileString: String = ""
 
-    func updateWindowTitle() {
-        let filename = currentURL?.lastPathComponent ?? "Untitled"
-        let prefix = isDirty ? "*" : ""
-        let newTitle = "\(prefix)\(filename)"
-        if self.window?.title != newTitle {
-            self.window?.title = newTitle
+    // Explicit TextKit 1 stack; non-contiguous layout keeps large files responsive.
+    private let textView: DragDropTextView = {
+        let textStorage = NSTextStorage()
+        let layoutManager = NSLayoutManager()
+        layoutManager.allowsNonContiguousLayout = true
+        textStorage.addLayoutManager(layoutManager)
+        let textContainer = NSTextContainer(containerSize: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+        textContainer.widthTracksTextView = true
+        layoutManager.addTextContainer(textContainer)
+        return DragDropTextView(frame: .zero, textContainer: textContainer)
+    }()
+    private let searchBar = SearchBarView()
+
+    private var currentURL: URL? {
+        didSet { updateWindowTitle() }
+    }
+    private(set) var isDirty = false {
+        didSet {
+            window?.isDocumentEdited = isDirty
+            updateWindowTitle()
         }
+    }
+
+    // Snapshot of the text as last loaded/saved, used to detect undo back to a clean state.
+    private var savedText: NSString = ""
+
+    // Live backing store; avoids copying the whole document into a Swift String.
+    private var buffer: NSMutableString {
+        textView.textStorage!.mutableString
+    }
+
+    private func updateWindowTitle() {
+        window?.title = (isDirty ? "*" : "") + (currentURL?.lastPathComponent ?? "Untitled")
     }
 
     convenience init() {
@@ -137,10 +144,10 @@ class MainWindowController: NSWindowController, NSWindowDelegate {
             defer: false
         )
         window.center()
-        
+
         // Force window to use light mode styling appearance explicitly
         window.appearance = NSAppearance(named: .aqua)
-        
+
         self.init(window: window)
         window.delegate = self
         setupViews()
@@ -149,13 +156,13 @@ class MainWindowController: NSWindowController, NSWindowDelegate {
 
     private func setupViews() {
         guard let window = self.window, let contentView = window.contentView else { return }
-        
-        containerStackView = NSStackView()
+
+        let containerStackView = NSStackView()
         containerStackView.spacing = 0
         containerStackView.orientation = .vertical
         containerStackView.alignment = .centerX
         containerStackView.translatesAutoresizingMaskIntoConstraints = false
-        
+
         contentView.addSubview(containerStackView)
         NSLayoutConstraint.activate([
             containerStackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
@@ -163,9 +170,8 @@ class MainWindowController: NSWindowController, NSWindowDelegate {
             containerStackView.topAnchor.constraint(equalTo: contentView.topAnchor),
             containerStackView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
         ])
-        
+
         // Search Bar Setup
-        searchBar = SearchBarView()
         searchBar.translatesAutoresizingMaskIntoConstraints = false
         searchBar.isHidden = true
         searchBar.onSearchTextChanged = { [weak self] query in
@@ -178,232 +184,158 @@ class MainWindowController: NSWindowController, NSWindowDelegate {
             self?.performReplaceAll(find: find, replace: replace)
         }
         searchBar.onCloseRequested = { [weak self] in
-            self?.searchBar.isHidden = true
-            self?.window?.makeFirstResponder(self?.textView)
+            guard let self = self else { return }
+            self.searchBar.isHidden = true
+            self.window?.makeFirstResponder(self.textView)
         }
-        
+
         containerStackView.addArrangedSubview(searchBar)
         NSLayoutConstraint.activate([
             searchBar.leadingAnchor.constraint(equalTo: containerStackView.leadingAnchor),
             searchBar.trailingAnchor.constraint(equalTo: containerStackView.trailingAnchor),
             searchBar.heightAnchor.constraint(equalToConstant: 35)
         ])
-        
-        // Text View Setup (TextKit 1 Assembly with solid light visibility tracking controls)
+
+        // Text View Setup (TextKit 1)
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.translatesAutoresizingMaskIntoConstraints = false
-        
-        let textStorage = NSTextStorage()
-        let layoutManager = NSLayoutManager()
-        textStorage.addLayoutManager(layoutManager)
-        
-        let textContainer = NSTextContainer(containerSize: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
-        textContainer.widthTracksTextView = true
-        layoutManager.addTextContainer(textContainer)
-        
-        textView = DragDropTextView(frame: .zero, textContainer: textContainer)
+
         textView.minSize = NSSize(width: 0.0, height: 0.0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
         textView.isRichText = false
-        textView.importsGraphics = false
-        textView.isIncrementalSearchingEnabled = false
         textView.allowsUndo = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
         textView.isAutomaticSpellingCorrectionEnabled = false
-        
-        // Fix visibility rendering by locking background drawing structures to white
-        textView.drawsBackground = true
+
+        // Lock colors so text stays visible regardless of system appearance
         textView.backgroundColor = NSColor.white
-        textView.textColor = NSColor.black
         textView.insertionPointColor = NSColor.black
-        
-        // Block text system attribution fallback leakage dictionary mutations
-        textView.typingAttributes = [
-            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
-            .foregroundColor: NSColor.black
-        ]
-        
-        textView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        textView.font = editorFont
+        textView.textColor = NSColor.black
+        textView.typingAttributes = [.font: editorFont, .foregroundColor: NSColor.black]
+
         textView.delegate = self
-        
-        if let dragTextView = textView as? DragDropTextView {
-            dragTextView.onFileDropped = { [weak self] url in
-                self?.handleFileOpen(url: url)
-            }
+        textView.onFileDropped = { [weak self] url in
+            self?.handleFileOpen(url: url)
         }
-        
+
         scrollView.documentView = textView
         containerStackView.addArrangedSubview(scrollView)
-        
+
         NSLayoutConstraint.activate([
             scrollView.leadingAnchor.constraint(equalTo: containerStackView.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: containerStackView.trailingAnchor)
         ])
-        
+
         window.makeFirstResponder(textView)
     }
 
-    // MARK: - Internal Engine Mechanics
+    // MARK: - File Handling
 
     func handleFileOpen(url: URL) {
-        verifyAndProcessFileSwap(targetURL: url) { [weak self] in
-            self?.loadPathIntoMemory(url: url)
+        resolveUnsavedChanges { [self] proceed in
+            if proceed { loadFile(url: url) }
         }
     }
 
-    private func loadPathIntoMemory(url: URL) {
+    private func loadFile(url: URL) {
+        guard url.isFileURL else { return }
         let resolvedURL = url.resolvingSymlinksInPath()
-        
-        var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: resolvedURL.path, isDirectory: &isDir), isDir.boolValue {
-            showNativeAlert(title: "Cannot Open Directory", message: "Folders and directories cannot be opened.")
+
+        do {
+            // Reject directories, FIFOs and devices, which would fail or block forever when read.
+            guard try resolvedURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else {
+                showAlert(title: "Cannot Open File", message: "Only regular files can be opened.")
+                return
+            }
+            let text = decode(try Data(contentsOf: resolvedURL))
+            textView.string = text
+            textView.font = editorFont
+            textView.textColor = NSColor.black
+            textView.undoManager?.removeAllActions()
+            markSaved(url: resolvedURL)
+        } catch {
+            showAlert(title: "Open Failure", message: error.localizedDescription)
+        }
+    }
+
+    private func decode(_ data: Data) -> String {
+        if let text = String(data: data, encoding: .utf8) { return text }
+        if data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF]),
+           let text = String(data: data, encoding: .utf16) {
+            return text
+        }
+        // macOSRoman maps every byte, so it is the final fallback.
+        return String(data: data, encoding: .windowsCP1252)
+            ?? String(data: data, encoding: .macOSRoman)
+            ?? String(decoding: data, as: UTF8.self)
+    }
+
+    private func write(to url: URL) -> Bool {
+        do {
+            try Data(textView.string.utf8).write(to: url, options: .atomic)
+            markSaved(url: url)
+            return true
+        } catch {
+            showAlert(title: "Save Failure", message: error.localizedDescription)
+            return false
+        }
+    }
+
+    private func markSaved(url: URL?) {
+        savedText = NSString(string: buffer)
+        currentURL = url
+        isDirty = false
+    }
+
+    private func save(as forcePanel: Bool = false, completion: @escaping (Bool) -> Void = { _ in }) {
+        if !forcePanel, let url = currentURL {
+            completion(write(to: url))
             return
         }
-        
-        do {
-            let fileData = try Data(contentsOf: resolvedURL)
-            let loadedString = decodeBytesWithFallback(fileData)
-            
-            // Clean mutation of underlying text container string contents
-            textView.string = loadedString
-            
-            // Re-apply light mode attributes across the loaded string buffer to fix invisible rendering
-            let range = NSRange(location: 0, length: (loadedString as NSString).length)
-            textView.textStorage?.addAttributes([
-                .foregroundColor: NSColor.black,
-                .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-            ], range: range)
-            
-            baseFileString = loadedString
-            currentURL = resolvedURL
-            isDirty = false
-            textView.undoManager?.removeAllActions()
-            updateWindowTitle()
-        } catch {
-            showNativeAlert(title: "Open Failure", message: "An error occurred reading the file resource.")
+        let savePanel = NSSavePanel()
+        savePanel.allowsOtherFileTypes = true
+        savePanel.beginSheetModal(for: window!) { [self] response in
+            guard response == .OK, let url = savePanel.url else { return completion(false) }
+            completion(write(to: url))
         }
     }
 
-    private func decodeBytesWithFallback(_ data: Data) -> String {
-        var convertedString: NSString?
-        let encodingHeuristics: [String.Encoding] = [.utf8, .macOSRoman, .windowsCP1252, .utf16]
-        
-        for encoding in encodingHeuristics {
-            if let string = NSString(data: data, encoding: encoding.rawValue) {
-                convertedString = string
-                break
-            }
-        }
-        
-        if let finalizedString = convertedString {
-            return finalizedString as String
-        }
-        
-        return String(decoding: data, as: UTF8.self)
-    }
+    /// Calls completion(true) when it is safe to discard the current buffer.
+    func resolveUnsavedChanges(completion: @escaping (Bool) -> Void) {
+        guard isDirty else { return completion(true) }
 
-    private func commitTextBufferToDisk(url: URL) {
-        let textData = textView.string.data(using: .utf8) ?? Data()
-        do {
-            try textData.write(to: url, options: .atomic)
-            currentURL = url
-            baseFileString = textView.string
-            isDirty = false
-            updateWindowTitle()
-        } catch {
-            showNativeAlert(title: "Save Failure", message: "The operation could not be completed on the physical filesystem structure.")
-        }
-    }
-
-    func verifyAndProcessFileSwap(targetURL: URL?, completion: @escaping () -> Void) {
-        if isDirty {
-            promptForUnsavedChanges { proceed in
-                if proceed { completion() }
-            }
-        } else {
-            completion()
-        }
-    }
-
-    func promptForUnsavedChanges(completion: @escaping (Bool) -> Void) {
         let alert = NSAlert()
         alert.messageText = "Do you want to save changes to the document?"
-        alert.informativeText = "Your modifications will be permanently discarded if you do not preserve them."
+        alert.informativeText = "Your changes will be lost if you don't save them."
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Don't Save")
         alert.addButton(withTitle: "Cancel")
-        
-        guard let window = self.window else {
-            let result = alert.runModal()
-            handlePromptResult(result: result, completion: completion)
-            return
-        }
-        
-        alert.beginSheetModal(for: window) { [weak self] response in
-            self?.handlePromptResult(result: response, completion: completion)
-        }
-    }
 
-    private func handlePromptResult(result: NSApplication.ModalResponse, completion: @escaping (Bool) -> Void) {
-        switch result {
-        case .alertFirstButtonReturn: // Save
-            if let targetURL = currentURL {
-                commitTextBufferToDisk(url: targetURL)
+        alert.beginSheetModal(for: window!) { [self] response in
+            switch response {
+            case .alertFirstButtonReturn:
+                save(completion: completion)
+            case .alertSecondButtonReturn:
+                isDirty = false
                 completion(true)
-            } else {
-                presentNativeSavePanel { [weak self] url in
-                    self?.commitTextBufferToDisk(url: url)
-                    completion(true)
-                } fallback: {
-                    completion(false)
-                }
-            }
-        case .alertSecondButtonReturn: // Don't Save
-            isDirty = false
-            completion(true)
-        default: // Cancel
-            completion(false)
-        }
-    }
-
-    private func presentNativeSavePanel(success: @escaping (URL) -> Void, fallback: (() -> Void)? = nil) {
-        let savePanel = NSSavePanel()
-        savePanel.allowsOtherFileTypes = true
-        
-        guard let window = self.window else {
-            if savePanel.runModal() == .OK, let url = savePanel.url {
-                success(url)
-            } else {
-                fallback?()
-            }
-            return
-        }
-        
-        savePanel.beginSheetModal(for: window) { response in
-            if response == .OK, let url = savePanel.url {
-                success(url)
-            } else {
-                fallback?()
+            default:
+                completion(false)
             }
         }
     }
 
-    private func showNativeAlert(title: String, message: String) {
+    private func showAlert(title: String, message: String) {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "OK")
-        if let window = self.window {
-            alert.beginSheetModal(for: window, completionHandler: nil)
-        } else {
-            alert.runModal()
-        }
+        alert.beginSheetModal(for: window!, completionHandler: nil)
     }
 
     // MARK: - Search Logic
@@ -413,11 +345,18 @@ class MainWindowController: NSWindowController, NSWindowDelegate {
             searchBar.updateMatchLabel(status: "")
             return
         }
-        
-        let contents = textView.string as NSString
-        let options: NSString.CompareOptions = [.literal]
-        let range = contents.range(of: query, options: options)
-        
+        selectMatch(query, from: 0)
+    }
+
+    /// Selects the first match at or after location, wrapping around to the start.
+    private func selectMatch(_ query: String, from location: Int) {
+        let contents = buffer
+        let start = min(location, contents.length)
+        var range = contents.range(of: query, options: .literal, range: NSRange(location: start, length: contents.length - start))
+        if range.location == NSNotFound {
+            range = contents.range(of: query, options: .literal)
+        }
+
         if range.location != NSNotFound {
             textView.setSelectedRange(range)
             textView.scrollRangeToVisible(range)
@@ -429,56 +368,35 @@ class MainWindowController: NSWindowController, NSWindowDelegate {
 
     private func performReplace(find: String, replace: String) {
         guard !find.isEmpty else { return }
-        
-        let contents = textView.string as NSString
+
         let selectedRange = textView.selectedRange()
-        
-        if selectedRange.length > 0 {
-            let currentSelectionText = contents.substring(with: selectedRange)
-            if currentSelectionText == find {
-                if textView.shouldChangeText(in: selectedRange, replacementString: replace) {
-                    textView.textStorage?.replaceCharacters(in: selectedRange, with: replace)
-                    textView.didChangeText()
-                }
-            }
+        var searchStart = selectedRange.location
+
+        if selectedRange.length > 0,
+           buffer.range(of: find, options: [.literal, .anchored], range: selectedRange) == selectedRange,
+           textView.shouldChangeText(in: selectedRange, replacementString: replace) {
+            textView.replaceCharacters(in: selectedRange, with: replace)
+            textView.didChangeText()
+            // Continue after the inserted text so a replacement containing the query is not matched again.
+            searchStart = selectedRange.location + (replace as NSString).length
         }
-        
-        let trackingContents = textView.string as NSString
-        let currentPosition = textView.selectedRange().location
-        let remainderRange = NSRange(location: currentPosition, length: trackingContents.length - currentPosition)
-        
-        var nextRange = trackingContents.range(of: find, options: .literal, range: remainderRange)
-        if nextRange.location == NSNotFound {
-            nextRange = trackingContents.range(of: find, options: .literal, range: NSRange(location: 0, length: trackingContents.length))
-        }
-        
-        if nextRange.location != NSNotFound {
-            textView.setSelectedRange(nextRange)
-            textView.scrollRangeToVisible(nextRange)
-            searchBar.updateMatchLabel(status: "Match Found")
-        } else {
-            searchBar.updateMatchLabel(status: "No Matches")
-        }
+
+        selectMatch(find, from: searchStart)
     }
 
     private func performReplaceAll(find: String, replace: String) {
         guard !find.isEmpty else { return }
-        
-        var contents = textView.string
-        var occurencesCount = 0
-        
-        while let range = contents.range(of: find, options: .literal) {
-            contents.replaceSubrange(range, with: replace)
-            occurencesCount += 1
-        }
-        
-        if occurencesCount > 0 {
-            let targetFullRange = NSRange(location: 0, length: (textView.string as NSString).length)
-            if textView.shouldChangeText(in: targetFullRange, replacementString: contents) {
-                textView.textStorage?.replaceCharacters(in: targetFullRange, with: contents)
+
+        let contents = NSMutableString(string: buffer)
+        let occurrencesCount = contents.replaceOccurrences(of: find, with: replace, options: .literal, range: NSRange(location: 0, length: contents.length))
+
+        if occurrencesCount > 0 {
+            let fullRange = NSRange(location: 0, length: buffer.length)
+            if textView.shouldChangeText(in: fullRange, replacementString: contents as String) {
+                textView.replaceCharacters(in: fullRange, with: contents as String)
                 textView.didChangeText()
             }
-            searchBar.updateMatchLabel(status: "Replaced \(occurencesCount)")
+            searchBar.updateMatchLabel(status: "Replaced \(occurrencesCount)")
         } else {
             searchBar.updateMatchLabel(status: "No Matches")
         }
@@ -487,13 +405,11 @@ class MainWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - Actions
 
     @objc func menuNewFile(_ sender: Any?) {
-        verifyAndProcessFileSwap(targetURL: nil) { [weak self] in
-            self?.textView.string = ""
-            self?.baseFileString = ""
-            self?.currentURL = nil
-            self?.isDirty = false
-            self?.textView.undoManager?.removeAllActions()
-            self?.updateWindowTitle()
+        resolveUnsavedChanges { [self] proceed in
+            guard proceed else { return }
+            textView.string = ""
+            textView.undoManager?.removeAllActions()
+            markSaved(url: nil)
         }
     }
 
@@ -502,35 +418,20 @@ class MainWindowController: NSWindowController, NSWindowDelegate {
         openPanel.canChooseFiles = true
         openPanel.canChooseDirectories = false
         openPanel.allowsMultipleSelection = false
-        
-        guard let window = self.window else {
-            if openPanel.runModal() == .OK, let url = openPanel.url {
-                handleFileOpen(url: url)
-            }
-            return
-        }
-        
-        openPanel.beginSheetModal(for: window) { [weak self] response in
+
+        openPanel.beginSheetModal(for: window!) { [self] response in
             if response == .OK, let url = openPanel.url {
-                self?.handleFileOpen(url: url)
+                handleFileOpen(url: url)
             }
         }
     }
 
     @objc func menuSaveFile(_ sender: Any?) {
-        if let targetURL = currentURL {
-            commitTextBufferToDisk(url: targetURL)
-        } else {
-            presentNativeSavePanel { [weak self] url in
-                self?.commitTextBufferToDisk(url: url)
-            }
-        }
+        save()
     }
 
     @objc func menuSaveAsFile(_ sender: Any?) {
-        presentNativeSavePanel { [weak self] url in
-            self?.commitTextBufferToDisk(url: url)
-        }
+        save(as: true)
     }
 
     @objc func menuFind(_ sender: Any?) {
@@ -539,29 +440,26 @@ class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc func menuPrintFile(_ sender: Any?) {
-        let printInfo = NSPrintInfo.shared
-        let printOperation = NSPrintOperation(view: textView, printInfo: printInfo)
-        printOperation.showsPrintPanel = true
-        printOperation.showsProgressPanel = true
-        if let window = self.window {
-            printOperation.runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
-        } else {
-            printOperation.run()
-        }
+        NSPrintOperation(view: textView).runModal(for: window!, delegate: nil, didRun: nil, contextInfo: nil)
     }
 
     // MARK: - Window Delegate
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        if isDirty {
-            promptForUnsavedChanges { proceed in
-                if proceed {
-                    sender.close()
-                }
-            }
-            return false
+        guard isDirty else { return true }
+        resolveUnsavedChanges { proceed in
+            if proceed { sender.close() }
         }
-        return true
+        return false
+    }
+}
+
+// MARK: - Menu Validation
+
+extension MainWindowController: NSMenuItemValidation {
+    // Disable file actions while a sheet is up so prompts and panels cannot stack.
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        return window?.attachedSheet == nil
     }
 }
 
@@ -569,14 +467,9 @@ class MainWindowController: NSWindowController, NSWindowDelegate {
 
 extension MainWindowController: NSTextViewDelegate {
     func textDidChange(_ notification: Notification) {
-        isDirty = (textView.string != baseFileString)
-        
-        // Enforce solid black text attribute mapping across incoming runtime typing sequences
-        let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
-        textView.textStorage?.addAttributes([
-            .foregroundColor: NSColor.black,
-            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        ], range: fullRange)
+        // Length check first keeps typing O(1); full compare only when lengths match.
+        let current = buffer
+        isDirty = current.length != savedText.length || !current.isEqual(to: savedText as String)
     }
 }
 
@@ -585,167 +478,139 @@ extension MainWindowController: NSTextViewDelegate {
 class DragDropTextView: NSTextView {
     var onFileDropped: ((URL) -> Void)?
 
-    override func awakeFromNib() {
-        super.awakeFromNib()
-        registerForDraggedTypes([NSPasteboard.PasteboardType.fileURL])
+    private static let fileURLOptions: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+
+    // NSTextView re-registers drag types itself, so extend its list instead of registering once.
+    override var acceptableDragTypes: [NSPasteboard.PasteboardType] {
+        return super.acceptableDragTypes + [.fileURL]
     }
 
-    override init(frame frameRect: NSRect, textContainer: NSTextContainer?) {
-        super.init(frame: frameRect, textContainer: textContainer)
-        registerForDraggedTypes([NSPasteboard.PasteboardType.fileURL])
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        registerForDraggedTypes([NSPasteboard.PasteboardType.fileURL])
+    private func carriesFile(_ sender: NSDraggingInfo) -> Bool {
+        return sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: Self.fileURLOptions)
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        let pasteboard = sender.draggingPasteboard
-        if pasteboard.availableType(from: [NSPasteboard.PasteboardType.fileURL]) != nil {
-            return .copy
-        }
-        return []
+        return carriesFile(sender) ? .copy : super.draggingEntered(sender)
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        return carriesFile(sender) ? .copy : super.draggingUpdated(sender)
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        let pasteboard = sender.draggingPasteboard
-        let classes = [NSURL.self] as [AnyClass]
-        guard let urls = pasteboard.readObjects(forClasses: classes, options: nil) as? [URL],
-              let absoluteFirstFile = urls.first else {
-            return false
+        guard let url = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: Self.fileURLOptions)?.first as? URL else {
+            return super.performDragOperation(sender)
         }
-        
-        onFileDropped?(absoluteFirstFile)
+        onFileDropped?(url)
         return true
     }
 }
 
 class SearchBarView: NSView {
-    
+
     var onSearchTextChanged: ((String) -> Void)?
     var onReplaceRequested: ((String, String) -> Void)?
     var onReplaceAllRequested: ((String, String) -> Void)?
     var onCloseRequested: (() -> Void)?
-    
-    private var searchField: NSTextField!
-    private var replaceField: NSTextField!
-    private var statusLabel: NSTextField!
-    private var borderLayer: CALayer?
-    
+
+    private let searchField = NSTextField(string: "")
+    private let replaceField = NSTextField(string: "")
+    private let statusLabel = NSTextField(labelWithString: "")
+    private let borderLayer = CALayer()
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         setupInterface()
     }
-    
+
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         setupInterface()
     }
-    
+
     override func layout() {
         super.layout()
-        // Update solid bottom border path frame on window resize layout loops
-        borderLayer?.frame = CGRect(x: 0, y: 0, width: bounds.width, height: 1)
+        // Keep the bottom border spanning the full width on resize
+        borderLayer.frame = CGRect(x: 0, y: 0, width: bounds.width, height: 1)
     }
-    
-    override func viewWillDraw() {
-        super.viewWillDraw()
-        // Enforce solid explicit white background color structure across rendering operations
-        layer?.backgroundColor = NSColor.white.cgColor
-    }
-    
+
     private func setupInterface() {
         wantsLayer = true
-        
-        // Enforce explicit white background and aqua appearance for the container layout
-        self.appearance = NSAppearance(named: .aqua)
+        appearance = NSAppearance(named: .aqua)
         layer?.backgroundColor = NSColor.white.cgColor
-        
-        // Add solid dark line border on the bottom of the pane panel view surface
-        let bottomBorder = CALayer()
-        bottomBorder.backgroundColor = NSColor.separatorColor.cgColor
-        layer?.addSublayer(bottomBorder)
-        self.borderLayer = bottomBorder
-        
-        searchField = NSTextField(string: "")
+
+        borderLayer.backgroundColor = NSColor.separatorColor.cgColor
+        layer?.addSublayer(borderLayer)
+
         searchField.placeholderString = "Find"
         searchField.translatesAutoresizingMaskIntoConstraints = false
         searchField.delegate = self
-        searchField.textColor = NSColor.black
-        searchField.backgroundColor = NSColor.white
-        
-        replaceField = NSTextField(string: "")
+
         replaceField.placeholderString = "Replace with"
         replaceField.translatesAutoresizingMaskIntoConstraints = false
-        replaceField.textColor = NSColor.black
-        replaceField.backgroundColor = NSColor.white
-        
+
         let replaceBtn = NSButton(title: "Replace", target: self, action: #selector(btnReplacePressed))
-        replaceBtn.bezelStyle = .rounded
         replaceBtn.translatesAutoresizingMaskIntoConstraints = false
-        
+
         let replaceAllBtn = NSButton(title: "All", target: self, action: #selector(btnReplaceAllPressed))
-        replaceAllBtn.bezelStyle = .rounded
         replaceAllBtn.translatesAutoresizingMaskIntoConstraints = false
-        
-        statusLabel = NSTextField(labelWithString: "")
+
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.font = NSFont.systemFont(ofSize: 11)
-        statusLabel.textColor = NSColor.separatorColor
-        
+        statusLabel.textColor = NSColor.secondaryLabelColor
+
         let closeBtn = NSButton(title: "✕", target: self, action: #selector(btnClosePressed))
         closeBtn.isBordered = false
         closeBtn.translatesAutoresizingMaskIntoConstraints = false
-        
+
         addSubview(searchField)
         addSubview(replaceField)
         addSubview(replaceBtn)
         addSubview(replaceAllBtn)
         addSubview(statusLabel)
         addSubview(closeBtn)
-        
+
         NSLayoutConstraint.activate([
             closeBtn.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             closeBtn.centerYAnchor.constraint(equalTo: centerYAnchor),
             closeBtn.widthAnchor.constraint(equalToConstant: 20),
-            
+
             searchField.leadingAnchor.constraint(equalTo: closeBtn.trailingAnchor, constant: 4),
             searchField.centerYAnchor.constraint(equalTo: centerYAnchor),
             searchField.widthAnchor.constraint(equalToConstant: 160),
-            
+
             replaceField.leadingAnchor.constraint(equalTo: searchField.trailingAnchor, constant: 8),
             replaceField.centerYAnchor.constraint(equalTo: centerYAnchor),
             replaceField.widthAnchor.constraint(equalToConstant: 140),
-            
+
             replaceBtn.leadingAnchor.constraint(equalTo: replaceField.trailingAnchor, constant: 4),
             replaceBtn.centerYAnchor.constraint(equalTo: centerYAnchor),
-            
+
             replaceAllBtn.leadingAnchor.constraint(equalTo: replaceBtn.trailingAnchor, constant: 2),
             replaceAllBtn.centerYAnchor.constraint(equalTo: centerYAnchor),
-            
+
             statusLabel.leadingAnchor.constraint(equalTo: replaceAllBtn.trailingAnchor, constant: 8),
             statusLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             statusLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
     }
-    
+
     func focusSearchField() {
         window?.makeFirstResponder(searchField)
     }
-    
+
     func updateMatchLabel(status: String) {
         statusLabel.stringValue = status
     }
-    
+
     @objc private func btnReplacePressed() {
         onReplaceRequested?(searchField.stringValue, replaceField.stringValue)
     }
-    
+
     @objc private func btnReplaceAllPressed() {
         onReplaceAllRequested?(searchField.stringValue, replaceField.stringValue)
     }
-    
+
     @objc private func btnClosePressed() {
         onCloseRequested?()
     }

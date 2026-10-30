@@ -1,97 +1,40 @@
 # Makefile for Minimal Notepad macOS Application
 
 PRODUCT_NAME = MinimalNotepad
-APP_NAME = Minimal Notepad.app
 BUILD_DIR = build
-CONTENTS_DIR = $(BUILD_DIR)/$(APP_NAME)/Contents
-MACSOS_DIR = $(CONTENTS_DIR)/MacOS
-RESOURCES_DIR = $(CONTENTS_DIR)/Resources
+APP_DIR = $(BUILD_DIR)/Minimal Notepad.app
+APP_TARGET = $(BUILD_DIR)/Minimal\ Notepad.app
+CONTENTS_DIR = $(APP_DIR)/Contents
 
 SWIFT_FILES = main.swift
 SWIFT_FLAGS = -O
 
+INFO_PLIST = Resources/Info.plist
 APP_ICON = Resources/AppIcon.icns
 ICON_SET = Resources/MinimalNotepad.iconset
 
 .PHONY: all clean run icons
 
-all: $(BUILD_DIR)/$(APP_NAME)
+all: $(APP_TARGET)
 
-$(BUILD_DIR)/$(APP_NAME): icons $(SWIFT_FILES)
-	@echo "Creating application bundle directories..."
-	mkdir -p "$(MACSOS_DIR)"
-	mkdir -p "$(RESOURCES_DIR)"
-	
-	@echo "Compiling Swift executable..."
-	swiftc $(SWIFT_FLAGS) $(SWIFT_FILES) -o "$(MACSOS_DIR)/$(PRODUCT_NAME)"
-	
-	@if [ -f $(APP_ICON) ]; then \
-		echo "Copying application icon..."; \
-		cp $(APP_ICON) "$(RESOURCES_DIR)/AppIcon.icns"; \
-	fi
-	
-	@echo "Generating PkgInfo..."
-	echo "APPL????" > "$(CONTENTS_DIR)/PkgInfo"
-	
-	@echo "Creating Info.plist..."
-	@echo '<?xml version="1.0" encoding="UTF-8"?>' > "$(CONTENTS_DIR)/Info.plist"
-	@echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '<plist version="1.0">' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '<dict>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <key>CFBundleDevelopmentRegion</key>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <string>en</string>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <key>CFBundleExecutable</key>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <string>$(PRODUCT_NAME)</string>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <key>CFBundleIdentifier</key>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <string>com.minimal.notepad</string>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <key>CFBundleInfoDictionaryVersion</key>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <string>6.0</string>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <key>CFBundleName</key>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <string>Minimal Notepad</string>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <key>CFBundlePackageType</key>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <string>APPL</string>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <key>CFBundleShortVersionString</key>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <string>1.0</string>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <key>CFBundleVersion</key>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <string>1</string>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <key>LSMinimumSystemVersion</key>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <string>11.0</string>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <key>NSPrincipalClass</key>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <string>NSApplication</string>' >> "$(CONTENTS_DIR)/Info.plist"
-	@if [ -f $(APP_ICON) ]; then \
-		echo '    <key>CFBundleIconFile</key>' >> "$(CONTENTS_DIR)/Info.plist"; \
-		echo '    <string>AppIcon</string>' >> "$(CONTENTS_DIR)/Info.plist"; \
-	fi
-	@echo '    <key>CFBundleDocumentTypes</key>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    <array>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '        <dict>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '            <key>CFBundleTypeName</key>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '            <string>Plain Text</string>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '            <key>CFBundleTypeRole</key>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '            <string>Editor</string>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '            <key>LSHandlerRank</key>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '            <string>Alternate</string>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '            <key>LSItemContentTypes</key>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '            <array>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '                <string>public.data</string>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '                <string>public.item</string>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '                <string>public.content</string>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '            </array>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '        </dict>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '    </array>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '</dict>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo '</plist>' >> "$(CONTENTS_DIR)/Info.plist"
-	@echo "Build successful: $(BUILD_DIR)/$(APP_NAME)"
-	@touch "$(BUILD_DIR)/$(APP_NAME)"
+$(APP_TARGET): $(SWIFT_FILES) $(INFO_PLIST) $(APP_ICON)
+	mkdir -p "$(CONTENTS_DIR)/MacOS" "$(CONTENTS_DIR)/Resources"
+	swiftc $(SWIFT_FLAGS) $(SWIFT_FILES) -o "$(CONTENTS_DIR)/MacOS/$(PRODUCT_NAME)"
+	cp $(INFO_PLIST) "$(CONTENTS_DIR)/Info.plist"
+	cp $(APP_ICON) "$(CONTENTS_DIR)/Resources/AppIcon.icns"
+	printf 'APPL????' > "$(CONTENTS_DIR)/PkgInfo"
+	codesign --force --sign - --options runtime "$(APP_DIR)"
+	touch "$(APP_DIR)"
+	@echo "Build successful: $(APP_DIR)"
 
 run: all
-	open "$(BUILD_DIR)/$(APP_NAME)"
+	open "$(APP_DIR)"
 
 clean:
 	rm -rf "$(BUILD_DIR)"
 
+# Regenerates the iconset and AppIcon.icns from icon_512x512@2x.png; run manually when the artwork changes.
 icons:
-	@mkdir -p "$(BUILD_DIR)"
 	sips -z 16 16     $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_16x16.png
 	sips -z 32 32     $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_16x16@2x.png
 	sips -z 32 32     $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_32x32.png

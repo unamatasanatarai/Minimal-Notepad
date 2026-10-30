@@ -47,7 +47,7 @@ When you only need to inspect a log file, jot down immediate thoughts, or manipu
 Opens straight into an active editor window using a single-process AppKit lifecycle. All file interactions, document resets, and external drag-and-drop actions recycle the existing window canvas cleanly without spawning unmanaged windows or background helper processes.
 
 ### 🛡️ Resilient Encoding Fallback Engine
-Opens arbitrary file types safely using a multi-stage encoding detection pipeline. If standard `UTF-8` parsing fails, the engine cascades through `macOS Roman`, `Windows-CP1252`, and `UTF-16` decoders before falling back to loss-tolerant UTF-8 byte mapping, preventing window freezes or read crashes on legacy files.
+Opens arbitrary file types safely using a multi-stage encoding detection pipeline. If standard `UTF-8` parsing fails, the engine tries `UTF-16` (when a byte-order mark is present), then `Windows-CP1252`, and finally `macOS Roman`, which accepts any byte sequence, preventing window freezes or read crashes on legacy files.
 
 ### 🔍 Integrated Linear Search & Batch Replace
 Access an inline query drawer via `Cmd + F` built directly into the window stack. Perform instant literal string queries with real-time match tracking, wrap-around navigation, single occurrence substitution, and full document bulk replacements.
@@ -56,7 +56,7 @@ Access an inline query drawer via `Cmd + F` built directly into the window stack
 Visual change indicators keep you informed in real time: an asterisk (`*`) prefixes the active file name in the top title bar and activates the native macOS unsaved document indicator. Modifying or closing the buffer prompts a native confirmation sheet to prevent accidental data loss.
 
 ### 📂 Seamless Drag-and-Drop Ingestion
-Drop files directly from Finder onto the editor canvas. The system automatically inspects filesystem references, resolves symbolic links and aliases down to their target paths, and rejects directory structures with informative native alerts.
+Drop files directly from Finder onto the editor canvas. The system automatically inspects filesystem references, resolves symbolic links down to their target paths, and rejects directories, pipes, and devices with informative native alerts.
 
 ### 🖨️ Native System Print Integration
 Generate standard paginated print operations using the system printing pipeline via `Cmd + P`, supporting physical printer output, preview formatting, and direct PDF generation.
