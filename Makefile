@@ -1,47 +1,82 @@
-# Makefile for Minimal Notepad macOS Application
+.DEFAULT_GOAL := help
+.PHONY: help setup build run kill test dmg icons release revoke clean
 
-PRODUCT_NAME = MinimalNotepad
-BUILD_DIR = build
-APP_DIR = $(BUILD_DIR)/Minimal Notepad.app
-APP_TARGET = $(BUILD_DIR)/Minimal\ Notepad.app
-CONTENTS_DIR = $(APP_DIR)/Contents
+APP_NAME  ?= $(shell bash -c 'source ./scripts/config.sh && echo "$$APP_NAME"')
+BUNDLE_ID ?= $(shell bash -c 'source ./scripts/config.sh && echo "$$BUNDLE_ID"')
+APP_BUNDLE := build/$(APP_NAME).app
 
-SWIFT_FILES = main.swift
-SWIFT_FLAGS = -O
+## help: Display this help message
+help:
+	@echo "Usage: make [target]   (release: make release <x.y.z>)"
+	@echo ""
+	@echo "Targets:"
+	@awk '/^##/ { printf "  \033[36m%-20s\033[0m %s\n", substr($$2, 1, length($$2)-1), substr($$0, index($$0, $$3)) }' $(MAKEFILE_LIST)
 
-INFO_PLIST = Resources/Info.plist
-APP_ICON = Resources/AppIcon.icns
-ICON_SET = Resources/MinimalNotepad.iconset
+## setup: Configure app ID and app name
+setup:
+	@./scripts/setup.sh
 
-.PHONY: all clean run icons
+## build: Compile application bundle (.app), incrementing BUILD_NUMBER
+build:
+	@./scripts/build.sh
 
-all: $(APP_TARGET)
+## run: Kill running app, rebuild, and launch application
+run: kill build
+	@echo "==> Launching $(APP_NAME).app..."
+	@open "$(APP_BUNDLE)"
 
-$(APP_TARGET): $(SWIFT_FILES) $(INFO_PLIST) $(APP_ICON)
-	mkdir -p "$(CONTENTS_DIR)/MacOS" "$(CONTENTS_DIR)/Resources"
-	swiftc $(SWIFT_FLAGS) $(SWIFT_FILES) -o "$(CONTENTS_DIR)/MacOS/$(PRODUCT_NAME)"
-	cp $(INFO_PLIST) "$(CONTENTS_DIR)/Info.plist"
-	cp $(APP_ICON) "$(CONTENTS_DIR)/Resources/AppIcon.icns"
-	printf 'APPL????' > "$(CONTENTS_DIR)/PkgInfo"
-	codesign --force --sign - --options runtime "$(APP_DIR)"
-	touch "$(APP_DIR)"
-	@echo "Build successful: $(APP_DIR)"
+## kill: Terminate running application instances
+kill:
+	@echo "==> Terminating running $(APP_NAME) instances..."
+	@pkill -x "$(APP_NAME)" 2>/dev/null || true
+	@sleep 0.2
 
-run: all
-	open "$(APP_DIR)"
+## test: Run native Swift unit test suite
+test:
+	@./scripts/test.sh
 
-clean:
-	rm -rf "$(BUILD_DIR)"
+## dmg: Build styled DMG distribution package
+dmg:
+	@./scripts/build_dmg.sh
 
-# Regenerates the iconset and AppIcon.icns from icon_512x512@2x.png; run manually when the artwork changes.
+## icons: Generate high-resolution minimalist app icon set and compile AppIcon.icns
 icons:
-	sips -z 16 16     $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_16x16.png
-	sips -z 32 32     $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_16x16@2x.png
-	sips -z 32 32     $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_32x32.png
-	sips -z 64 64     $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_32x32@2x.png
-	sips -z 128 128   $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_128x128.png
-	sips -z 256 256   $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_128x128@2x.png
-	sips -z 256 256   $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_256x256.png
-	sips -z 512 512   $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_256x256@2x.png
-	sips -z 512 512   $(ICON_SET)/icon_512x512@2x.png --out $(ICON_SET)/icon_512x512.png
-	iconutil -c icns $(ICON_SET) -o $(APP_ICON)
+	@swift scripts/generate_app_icon.swift
+	@iconutil -c icns Resources/MinimalNotepad.iconset -o Resources/AppIcon.icns
+	@echo "✅ AppIcon.icns generated successfully."
+
+# Capture positional arguments for release targets (e.g. make release 1.1.0)
+ifeq ($(firstword $(MAKECMDGOALS)),release)
+  RELEASE_TARGET_VERSION := $(word 2,$(MAKECMDGOALS))
+  ifneq ($(RELEASE_TARGET_VERSION),)
+    $(eval $(RELEASE_TARGET_VERSION):;@:)
+  endif
+endif
+
+# Only accept VERSION from the make command line, never from the environment.
+RELEASE_VERSION := $(or $(RELEASE_TARGET_VERSION),$(if $(filter command line,$(origin VERSION)),$(VERSION)))
+
+## release: Release a new, higher version (make release <x.y.z>), build DMG, tag & publish
+release:
+	@if [ -z "$(RELEASE_VERSION)" ]; then \
+		echo "Error: A version is required: make release <x.y.z> (current: $$(cat VERSION))" >&2; \
+		exit 1; \
+	fi
+	@./scripts/release.sh "$(RELEASE_VERSION)"
+
+## revoke: Reset permissions and clear macOS caches
+revoke:
+	@echo "==> Revoking macOS permissions for $(BUNDLE_ID) and resetting caches..."
+	@tccutil reset All "$(BUNDLE_ID)" 2>/dev/null || true
+	@touch "$(APP_BUNDLE)" 2>/dev/null || true
+	@/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f -R "$(APP_BUNDLE)" 2>/dev/null || true
+	@qlmanage -r 2>/dev/null || true
+	@qlmanage -r cache 2>/dev/null || true
+	@killall Dock 2>/dev/null || true
+	@echo "✅ Revoke and cache reset complete."
+
+## clean: Remove build artifacts and temporary files
+clean:
+	@echo "==> Cleaning build artifacts..."
+	@rm -rf build .build /tmp/RunSwiftTests*
+	@echo "✅ Clean complete."

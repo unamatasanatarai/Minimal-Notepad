@@ -13,19 +13,23 @@ enum Pref {
     static let showInvisibles = "ShowInvisibles"
     static let saveOnFocusLost = "SaveOnFocusLost"
     static let sessionFiles = "SessionFiles"
+
+    static func registerDefaults() {
+        defaults.register(defaults: [
+            lineEnding: 0,
+            wordWrap: true,
+            appearance: 0,
+            restoreSession: true,
+            confirmClose: true,
+            showLineNumbers: true,
+            showInvisibles: false,
+            saveOnFocusLost: false
+        ])
+    }
 }
 
 let defaults = UserDefaults.standard
-defaults.register(defaults: [
-    Pref.lineEnding: 0,
-    Pref.wordWrap: true,
-    Pref.appearance: 0,
-    Pref.restoreSession: true,
-    Pref.confirmClose: true,
-    Pref.showLineNumbers: true,
-    Pref.showInvisibles: false,
-    Pref.saveOnFocusLost: false
-])
+let documentController = DocumentController()
 
 func editorFont(size: CGFloat) -> NSFont {
     return NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
@@ -35,14 +39,6 @@ func editorFont(size: CGFloat) -> NSFont {
 let dimmedTextColor = NSColor(name: nil) { appearance in
     return appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? NSColor(white: 1, alpha: 0.18) : NSColor(white: 0, alpha: 0.18)
 }
-
-// MARK: - Main Application Entry Point
-
-let app = NSApplication.shared
-let documentController = DocumentController()   // first instance becomes NSDocumentController.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.run()
 
 // MARK: - Main Application Delegate
 
@@ -110,7 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         showQuitHint()
     }
 
-    private func showQuitHint() {
+    func showQuitHint() {
         let message = "Press ⌘Q again to quit"
         let label = NSTextField(labelWithString: message)
         label.font = NSFont.systemFont(ofSize: 15, weight: .medium)
@@ -160,7 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         documentController.closeAllDocuments(withDelegate: self, didCloseAllSelector: #selector(didCloseAll(_:didCloseAll:contextInfo:)), contextInfo: nil)
     }
 
-    @objc private func didCloseAll(_ controller: NSDocumentController, didCloseAll: Bool, contextInfo: UnsafeMutableRawPointer?) {
+    @objc func didCloseAll(_ controller: NSDocumentController, didCloseAll: Bool, contextInfo: UnsafeMutableRawPointer?) {
         if controller.documents.isEmpty { controller.newDocument(nil) }
     }
 
@@ -754,7 +750,7 @@ final class CloseRequest: NSObject {
 /// Its caret, undo history (the document's), zoom, wrap and search state are independent of other tabs.
 final class EditorPane: NSView {
     let document: TextDocument
-    private let textView: EditorTextView
+    let textView: EditorTextView
     private let scrollView = NSScrollView()
     private let searchBar = SearchBarView()
     private let lineNumberRuler: LineNumberRuler
@@ -1050,7 +1046,7 @@ final class EditorPane: NSView {
     }
 
     /// Places the caret at the start of a 1-based line, or at the end of the text if it has fewer lines.
-    private func moveCaret(toLine line: Int) {
+    func moveCaret(toLine line: Int) {
         guard let text = textView.textStorage?.string as NSString? else { return }
         var location = 0
         var current = 1
