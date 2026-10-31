@@ -8,7 +8,7 @@ cd "$project_dir"
 
 source "${script_dir}/config.sh"
 
-cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/${APP_NAME,,}"
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/$(printf "%s" "$APP_NAME" | tr "[:upper:]" "[:lower:]")"
 mkdir -p "$cache_dir"
 
 build_dir="build"

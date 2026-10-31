@@ -1,197 +1,379 @@
 import AppKit
 
 public enum EditorPaneTests {
+    static func makePane(_ text: String) -> (EditorPane, TextDocument) {
+        let doc = TextDocument()
+        doc.textStorage.mutableString.setString(text)
+        return (EditorPane(document: doc), doc)
+    }
+
+    /// A pane in a window, so edits are undoable through the document's undo manager (the window delegate supplies it).
+    static func makeHostedPane(_ text: String) throws -> (EditorPane, TextDocument) {
+        let doc = TextDocument()
+        doc.textStorage.mutableString.setString(text)
+        let controller = EditorWindowController()
+        controller.add(doc)
+        return (try unwrap(controller.selectedPane), doc)
+    }
+
+    /// Opens the search bar with a query, the way typing into the find field does.
+    static func search(_ pane: EditorPane, _ query: String, replace: String? = nil, matchCase: Bool = false) throws -> TestSupport.SearchControls {
+        let controls = try TestSupport.searchControls(of: pane)
+        if controls.bar.isHidden { pane.showFind(nil) }
+        controls.matchCase.state = matchCase ? .on : .off
+        if let replace = replace { controls.replace.stringValue = replace }
+        controls.find.stringValue = query
+        controls.bar.onQueryChanged?()
+        return controls
+    }
+
     public static func run(testRunner: (String, () throws -> Void) -> Void) {
-        testRunner("EditorPane initialization, views hierarchy, and detach") {
-            let doc = TextDocument()
-            doc.textStorage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "Hello World\nLine 2\nLine 3")
-            let pane = EditorPane(document: doc)
-            assert(pane.document === doc)
-            assert(pane.subviews.count > 0)
-
-            // Test supplemental target for document actions
-            let targetForSave = pane.supplementalTarget(forAction: #selector(NSDocument.save(_:)), sender: nil)
-            assert(targetForSave as? NSDocument === doc)
-
-            let targetForOther = pane.supplementalTarget(forAction: #selector(NSObject.copy), sender: nil)
-            _ = targetForOther
-
-            // Focus and detach
-            pane.focus()
+        testRunner("EditorPane shares the document's storage and detaches from it") {
+            let (pane, doc) = makePane("Hello")
+            try expect(pane.textView.textStorage === doc.textStorage)
+            try expectEqual(doc.textStorage.layoutManagers.count, 1)
+            try expect(pane.textView.layoutManager is InvisiblesLayoutManager)
+            try expect(pane.textView.layoutManager?.allowsNonContiguousLayout == true)
+            try expect(!pane.textView.isRichText)
+            try expect(pane.textView.allowsUndo)
+            try expect(!pane.textView.isAutomaticQuoteSubstitutionEnabled)
+            try expect(!pane.textView.isAutomaticDashSubstitutionEnabled)
+            try expect(!pane.textView.isAutomaticTextReplacementEnabled)
+            try expect(!pane.textView.isAutomaticSpellingCorrectionEnabled)
             pane.detach()
+            try expectEqual(doc.textStorage.layoutManagers.count, 0)
+            pane.detach()   // twice is harmless
         }
 
-        testRunner("EditorPane word wrap toggling and zoom bounds") {
-            let doc = TextDocument()
-            let pane = EditorPane(document: doc)
+        testRunner("EditorPane forwards document actions to its document only") {
+            let (pane, doc) = makePane("")
+            try expect(pane.supplementalTarget(forAction: #selector(NSDocument.save(_:)), sender: nil) as AnyObject? === doc)
+            try expect(pane.supplementalTarget(forAction: #selector(NSDocument.printDocument(_:)), sender: nil) as AnyObject? === doc)
+            try expect(pane.supplementalTarget(forAction: #selector(NSText.selectAll(_:)), sender: nil) as AnyObject? !== doc)
+        }
 
-            let wrapItem = NSMenuItem(title: "Wrap", action: #selector(EditorPane.toggleWordWrap(_:)), keyEquivalent: "")
-            let zoomInItem = NSMenuItem(title: "Zoom In", action: #selector(EditorPane.zoomIn(_:)), keyEquivalent: "")
-            let zoomOutItem = NSMenuItem(title: "Zoom Out", action: #selector(EditorPane.zoomOut(_:)), keyEquivalent: "")
-            let otherItem = NSMenuItem(title: "Other", action: #selector(NSObject.description), keyEquivalent: "")
+        testRunner("EditorPane applies the line number and invisibles preferences live") {
+            let (pane, _) = makePane("a b")
+            let layoutManager = try unwrap(pane.textView.layoutManager as? InvisiblesLayoutManager)
+            let scrollView = try unwrap(pane.textView.enclosingScrollView)
+            try expect(scrollView.rulersVisible, "line numbers are on by default")
+            try expect(!layoutManager.showsInvisibles)
 
-            // Toggle word wrap
-            let initialWrapState = pane.validateMenuItem(wrapItem)
-            assert(initialWrapState == true)
-            let stateBefore = wrapItem.state
+            defaults.set(false, forKey: Pref.showLineNumbers)
+            defaults.set(true, forKey: Pref.showInvisibles)
+            NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: defaults)
+            try expect(!scrollView.rulersVisible)
+            try expect(layoutManager.showsInvisibles)
+
+            // Posting again with nothing changed must leave things alone.
+            NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: defaults)
+            try expect(!scrollView.rulersVisible)
+            try expect(layoutManager.showsInvisibles)
+        }
+
+        testRunner("EditorPane word wrap follows the preference and toggles") {
+            defaults.set(false, forKey: Pref.wordWrap)
+            let (noWrap, _) = makePane("")
+            try expect(noWrap.textView.isHorizontallyResizable, "not wrapping: the text view grows sideways")
+            try expect(noWrap.textView.textContainer?.widthTracksTextView == false)
+            try expect(noWrap.textView.enclosingScrollView?.hasHorizontalScroller == true)
+
+            defaults.set(true, forKey: Pref.wordWrap)
+            let (pane, _) = makePane("")
+            let item = NSMenuItem(title: "Wrap", action: #selector(EditorPane.toggleWordWrap(_:)), keyEquivalent: "")
+            try expect(pane.validateMenuItem(item))
+            try expectEqual(item.state, .on)
+            try expect(!pane.textView.isHorizontallyResizable)
+            try expect(pane.textView.textContainer?.widthTracksTextView == true)
+
             pane.toggleWordWrap(nil)
-            _ = pane.validateMenuItem(wrapItem)
-            assert(wrapItem.state != stateBefore)
+            _ = pane.validateMenuItem(item)
+            try expectEqual(item.state, .off)
+            try expect(pane.textView.isHorizontallyResizable)
+            try expectEqual(pane.textView.textContainer?.containerSize.width, CGFloat.greatestFiniteMagnitude)
+
             pane.toggleWordWrap(nil)
-            _ = pane.validateMenuItem(wrapItem)
-            assert(wrapItem.state == stateBefore)
+            _ = pane.validateMenuItem(item)
+            try expectEqual(item.state, .on)
+        }
 
-            // Zoom In repeatedly up to max (72)
-            for _ in 0..<100 {
-                pane.zoomIn(nil)
-            }
-            assert(!pane.validateMenuItem(zoomInItem), "Zoom In should disable at max size 72")
-            assert(pane.validateMenuItem(zoomOutItem), "Zoom Out should be enabled at max size 72")
+        testRunner("EditorPane zoom changes font size between 6 and 72 points") {
+            let (pane, _) = makePane("text")
+            let base = NSFont.systemFontSize
+            try expectEqual(pane.textView.font?.pointSize, base)
+            let zoomIn = NSMenuItem(title: "", action: #selector(EditorPane.zoomIn(_:)), keyEquivalent: "")
+            let zoomOut = NSMenuItem(title: "", action: #selector(EditorPane.zoomOut(_:)), keyEquivalent: "")
+            let other = NSMenuItem(title: "", action: #selector(NSObject.description), keyEquivalent: "")
 
-            // Zoom Out repeatedly down to min (6)
-            for _ in 0..<100 {
-                pane.zoomOut(nil)
-            }
-            assert(!pane.validateMenuItem(zoomOutItem), "Zoom Out should disable at min size 6")
-            assert(pane.validateMenuItem(zoomInItem), "Zoom In should be enabled at min size 6")
+            pane.zoomIn(nil)
+            try expectEqual(pane.textView.font?.pointSize, base + 1)
+            try expectEqual((pane.textView.typingAttributes[.font] as? NSFont)?.pointSize, base + 1)
+            try expectEqual((pane.textView.layoutManager as? InvisiblesLayoutManager)?.font.pointSize, base + 1)
 
-            // Reset zoom
+            for _ in 0..<100 { pane.zoomIn(nil) }
+            try expectEqual(pane.textView.font?.pointSize, 72)
+            try expect(!pane.validateMenuItem(zoomIn))
+            try expect(pane.validateMenuItem(zoomOut))
+
+            for _ in 0..<100 { pane.zoomOut(nil) }
+            try expectEqual(pane.textView.font?.pointSize, 6)
+            try expect(!pane.validateMenuItem(zoomOut))
+            try expect(pane.validateMenuItem(zoomIn))
+
             pane.resetZoom(nil)
-            assert(pane.validateMenuItem(zoomInItem))
-            assert(pane.validateMenuItem(zoomOutItem))
-            assert(pane.validateMenuItem(otherItem))
+            try expectEqual(pane.textView.font?.pointSize, base)
+            try expect(pane.validateMenuItem(zoomIn) && pane.validateMenuItem(zoomOut) && pane.validateMenuItem(other))
         }
 
-        testRunner("EditorPane search, navigation, replace, and replace all") {
-            let doc = TextDocument()
-            doc.textStorage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "apple banana apple cherry apple")
-            let pane = EditorPane(document: doc)
+        testRunner("EditorPane converts pasted or typed CR and CRLF to LF") {
+            let (pane, doc) = makePane("")
+            let textView = pane.textView
+            try expect(pane.textView(textView, shouldChangeTextIn: NSRange(location: 0, length: 0), replacementString: "plain"))
+            try expect(pane.textView(textView, shouldChangeTextIn: NSRange(location: 0, length: 0), replacementString: nil), "attribute-only changes pass")
 
-            // Reveal search bar
-            pane.showFind(nil)
-            pane.showReplace(nil)
+            textView.insertText("a\r\nb\rc", replacementRange: NSRange(location: 0, length: 0))
+            try expectEqual(doc.textStorage.string, "a\nb\nc")
+            textView.insertText("X\r\n", replacementRange: NSRange(location: 1, length: 1))
+            try expectEqual(doc.textStorage.string, "aX\nb\nc")
+        }
 
-            // Find next / previous with no search query or hidden bar
+        testRunner("EditorPane search: statuses for match counts and current match") {
+            let (pane, _) = makePane("apple banana apple cherry apple")
+            var controls = try search(pane, "apple")
+            try expectEqual(controls.bar.status, "1 of 3")
+            try expectEqual(pane.textView.selectedRange(), NSRange(location: 0, length: 5))
+            try expectEqual(pane.textView.findHighlights.count, 3)
+
+            // Caret away from a match: count only, singular and plural.
+            pane.textView.setSelectedRange(NSRange(location: 7, length: 0))
+            try expectEqual(controls.bar.status, "3 matches")
+            controls = try search(pane, "cherry")
+            try expectEqual(controls.bar.status, "1 of 1")
+            pane.textView.setSelectedRange(NSRange(location: 0, length: 0))
+            try expectEqual(controls.bar.status, "1 match")
+
+            controls = try search(pane, "watermelon")
+            try expectEqual(controls.bar.status, "No matches")
+            try expect(pane.textView.findHighlights.isEmpty)
+
+            controls = try search(pane, "")
+            try expectEqual(controls.bar.status, "")
+        }
+
+        testRunner("EditorPane search starts at the caret and wraps both ways") {
+            let (pane, _) = makePane("apple banana apple cherry apple")
+            pane.textView.setSelectedRange(NSRange(location: 8, length: 0))
+            let controls = try search(pane, "apple")
+            try expectEqual(controls.bar.status, "2 of 3", "the first match after the caret is selected")
+
             pane.findNext(nil)
+            try expectEqual(controls.bar.status, "3 of 3")
+            pane.findNext(nil)
+            try expectEqual(controls.bar.status, "1 of 3")
             pane.findPrevious(nil)
+            try expectEqual(controls.bar.status, "3 of 3")
+            pane.findPrevious(nil)
+            try expectEqual(controls.bar.status, "2 of 3")
 
-            // Hide search bar
-            pane.showFind(nil)
+            // Caret after the last match: the query wraps to the first.
+            pane.textView.setSelectedRange(NSRange(location: 31, length: 0))
+            _ = try search(pane, "apple")
+            try expectEqual(controls.bar.status, "1 of 3")
 
-            // Delegate change text notifications
-            let dummyTV = NSTextView()
-            pane.textDidChange(Notification(name: NSText.didChangeNotification, object: dummyTV))
-            pane.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: dummyTV))
-
-            // Text change with Carriage Return '\r' normalization
-            let allowedPlain = pane.textView(dummyTV, shouldChangeTextIn: NSRange(location: 0, length: 0), replacementString: "Clean text")
-            assert(allowedPlain == true, "Normal text without carriage returns should be allowed as-is")
-
-            let allowedCR = pane.textView(dummyTV, shouldChangeTextIn: NSRange(location: 0, length: 0), replacementString: "Carriage\r\nReturn")
-            assert(allowedCR == false, "Text with carriage returns should be intercepted and normalized")
+            // The buttons do the same as the menu items.
+            controls.next.performClick(nil)
+            try expectEqual(controls.bar.status, "2 of 3")
+            controls.previous.performClick(nil)
+            try expectEqual(controls.bar.status, "1 of 3")
         }
 
-        testRunner("EditorPane active search, replace, and replace all execution") {
-            let doc = TextDocument()
-            doc.textStorage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "apple banana apple cherry apple")
-            let pane = EditorPane(document: doc)
-            pane.showFind(nil)
-
-            // Locate SearchBarView inside pane hierarchy
-            func searchBarIn(_ view: NSView) -> SearchBarView? {
-                if let sb = view as? SearchBarView { return sb }
-                for sub in view.subviews {
-                    if let found = searchBarIn(sub) { return found }
-                }
-                return nil
-            }
-
-            guard let searchBar = searchBarIn(pane),
-                  let findField = searchBar.arrangedSubviews[0] as? NSSearchField,
-                  let caseCheckbox = searchBar.arrangedSubviews[3] as? NSButton,
-                  let replaceField = searchBar.arrangedSubviews[4] as? NSTextField else {
-                assertionFailure("Failed to resolve SearchBarView subcomponents")
-                return
-            }
-
-            // Test query with 3 matches
-            findField.stringValue = "apple"
-            searchBar.onQueryChanged?()
-            assert(searchBar.status == "1 of 3", "Status was: \(searchBar.status)")
-
-            // Navigate forward: 1 of 3 -> 2 of 3 -> 3 of 3 -> 1 of 3 (wrap)
-            searchBar.onNext?()
-            assert(searchBar.status == "2 of 3", "Status was: \(searchBar.status)")
-            searchBar.onNext?()
-            assert(searchBar.status == "3 of 3", "Status was: \(searchBar.status)")
-            searchBar.onNext?()
-            assert(searchBar.status == "1 of 3", "Status was: \(searchBar.status)")
-
-            // Navigate backward: 1 of 3 -> 3 of 3 -> 2 of 3
-            searchBar.onPrevious?()
-            assert(searchBar.status == "3 of 3", "Status was: \(searchBar.status)")
-            searchBar.onPrevious?()
-            assert(searchBar.status == "2 of 3", "Status was: \(searchBar.status)")
-
-            // Replace current match ('apple' -> 'orange')
-            replaceField.stringValue = "orange"
-            searchBar.onReplace?()
-            assert(doc.textStorage.string.contains("orange"))
-
-            // Replace all matches
-            searchBar.onReplaceAll?()
-            assert(searchBar.status.hasPrefix("Replaced"))
-            assert(!doc.textStorage.string.contains("apple"))
-            assert(doc.textStorage.string == "orange banana orange cherry orange")
-
-            // Test query with 0 matches
-            findField.stringValue = "watermelon"
-            searchBar.onQueryChanged?()
-            assert(searchBar.status == "No matches")
-            searchBar.onNext?()
-            searchBar.onReplaceAll?()
-
-            // Test case sensitivity toggle
-            caseCheckbox.state = .on
-            assert(searchBar.isCaseSensitive == true)
-            findField.stringValue = "Orange"
-            searchBar.onQueryChanged?()
-            assert(searchBar.status == "No matches") // all were lower-case 'orange'
-
-            caseCheckbox.state = .off
-            assert(searchBar.isCaseSensitive == false)
-            searchBar.onQueryChanged?()
-            assert(searchBar.status.contains("of 3") || searchBar.status == "3 matches")
-
-            // Close search bar
-            searchBar.onClose?()
-            assert(searchBar.isHidden == true)
+        testRunner("EditorPane search is case-insensitive unless Match Case is on, and literal") {
+            let (pane, _) = makePane("Apple apple APPLE a.c abc")
+            try expectEqual(try search(pane, "apple").bar.status, "1 of 3")
+            try expectEqual(try search(pane, "apple", matchCase: true).bar.status, "1 of 1")
+            try expectEqual(try search(pane, "Orange", matchCase: true).bar.status, "No matches")
+            try expectEqual(try search(pane, "a.c").bar.status, "1 of 1", "no regex or wildcard meaning")
+            // The Match Case checkbox re-runs the search.
+            let controls = try search(pane, "APPLE")
+            try expectEqual(pane.textView.findHighlights.count, 3)
+            controls.matchCase.performClick(nil)
+            try expectEqual(pane.textView.findHighlights.count, 1)
         }
 
-        testRunner("EditorPane goToLine with window and nil window") {
-            let doc = TextDocument()
-            doc.textStorage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "Line 1\nLine 2\nLine 3\nLine 4\nLine 5")
-            let pane = EditorPane(document: doc)
+        testRunner("EditorPane find next with a hidden or empty search bar opens it instead") {
+            let (pane, _) = makePane("abc")
+            let controls = try TestSupport.searchControls(of: pane)
+            try expect(controls.bar.isHidden)
+            pane.findNext(nil)
+            try expect(!controls.bar.isHidden, "find next opens the search bar")
+            pane.findPrevious(nil)
+            try expect(!controls.bar.isHidden)
+            try expectEqual(pane.textView.selectedRange(), NSRange(location: 0, length: 0), "nothing selected")
 
-            // Calling goToLine when not hosted in window is safe guard
-            pane.goToLine(nil)
+            // No matches: the selection is kept.
+            _ = try search(pane, "zzz")
+            pane.findNext(nil)
+            try expectEqual(pane.textView.selectedRange(), NSRange(location: 0, length: 0))
+        }
 
-            // Direct moveCaret testing: line 1, intermediate line 3, beyond EOF line 100
+        testRunner("EditorPane hiding the search bar clears highlights, and reopening restores them") {
+            let (pane, _) = makePane("a a a")
+            let controls = try search(pane, "a")
+            try expectEqual(pane.textView.findHighlights.count, 3)
+            controls.done.performClick(nil)
+            try expect(controls.bar.isHidden)
+            try expect(pane.textView.findHighlights.isEmpty)
+            pane.showReplace(nil)
+            try expect(!controls.bar.isHidden)
+            try expectEqual(pane.textView.findHighlights.count, 3, "the old query is searched again")
+        }
+
+        testRunner("EditorPane edits rescan matches after a delay, or at once when navigating") {
+            let (pane, doc) = makePane("one two")
+            let controls = try search(pane, "o")
+            try expectEqual(pane.textView.findHighlights.count, 2)
+
+            pane.textView.setSelectedRange(NSRange(location: 7, length: 0))
+            pane.textView.insertText(" four", replacementRange: pane.textView.selectedRange())
+            try expectEqual(doc.textStorage.string, "one two four")
+            try expectEqual(pane.textView.findHighlights.count, 2, "typing does not rescan immediately")
+            try expect(TestSupport.spin(timeout: 1) { pane.textView.findHighlights.count == 3 }, "rescanned after the delay")
+
+            pane.textView.insertText(" go", replacementRange: NSRange(location: 12, length: 0))
+            pane.textView.setSelectedRange(NSRange(location: 0, length: 0))
+            pane.findPrevious(nil)
+            try expectEqual(controls.bar.status, "4 of 4", "stale matches are refreshed before navigating")
+
+            // Edits while the bar is hidden schedule nothing.
+            controls.bar.onClose?()
+            pane.textView.insertText("o", replacementRange: NSRange(location: 0, length: 0))
+            TestSupport.drain(0.3)
+            try expect(pane.textView.findHighlights.isEmpty)
+        }
+
+        testRunner("EditorPane replace replaces the selected match and moves to the next") {
+            let (pane, doc) = try makeHostedPane("apple banana apple cherry apple")
+            let controls = try search(pane, "apple", replace: "orange")
+            controls.replaceButton.performClick(nil)
+            try expectEqual(doc.textStorage.string, "orange banana apple cherry apple")
+            try expectEqual(pane.textView.selectedRange(), NSRange(location: 14, length: 5), "the next match is selected")
+            try expectEqual(controls.bar.status, "1 of 2")
+
+            // With the caret not on a match, Replace only selects the next match.
+            pane.textView.setSelectedRange(NSRange(location: 0, length: 0))
+            controls.bar.onReplace?()
+            try expectEqual(doc.textStorage.string, "orange banana apple cherry apple")
+            try expectEqual(pane.textView.selectedRange(), NSRange(location: 14, length: 5))
+
+            // Undo restores the replaced text.
+            doc.undoManager?.undo()
+            try expectEqual(doc.textStorage.string, "apple banana apple cherry apple")
+        }
+
+        testRunner("EditorPane replace with text containing the query does not loop on its own output") {
+            let (pane, doc) = makePane("a b a")
+            let controls = try search(pane, "a", replace: "aa")
+            controls.bar.onReplace?()
+            try expectEqual(doc.textStorage.string, "aa b a")
+            try expectEqual(pane.textView.selectedRange(), NSRange(location: 5, length: 1), "skips past the inserted text")
+            controls.bar.onReplace?()
+            try expectEqual(doc.textStorage.string, "aa b aa")
+        }
+
+        testRunner("EditorPane replace with an empty replacement deletes the match") {
+            let (pane, doc) = makePane("x-y-z")
+            let controls = try search(pane, "-", replace: "")
+            controls.bar.onReplace?()
+            try expectEqual(doc.textStorage.string, "xy-z")
+        }
+
+        testRunner("EditorPane replace all: count, caret, undo and no-op cases") {
+            let (pane, doc) = try makeHostedPane("Apple banana apple cherry APPLE")
+            let controls = try search(pane, "apple", replace: "kiwi")
+            pane.textView.setSelectedRange(NSRange(location: 30, length: 0))
+            controls.replaceAll.performClick(nil)
+            try expectEqual(doc.textStorage.string, "kiwi banana kiwi cherry kiwi")
+            try expectEqual(controls.bar.status, "Replaced 3")
+            try expectEqual(pane.textView.selectedRange().location, 28, "the caret is clamped to the shorter text")
+            try expect(pane.textView.findHighlights.isEmpty)
+
+            doc.undoManager?.undo()
+            try expectEqual(doc.textStorage.string, "Apple banana apple cherry APPLE", "replace all is one undo step")
+
+            // Case-sensitive replace all only touches exact matches.
+            _ = try search(pane, "apple", replace: "pear", matchCase: true)
+            controls.bar.onReplaceAll?()
+            try expectEqual(doc.textStorage.string, "Apple banana pear cherry APPLE")
+
+            // No matches: the text and status are unchanged.
+            _ = try search(pane, "watermelon")
+            controls.bar.onReplaceAll?()
+            try expectEqual(doc.textStorage.string, "Apple banana pear cherry APPLE")
+            try expectEqual(controls.bar.status, "No matches")
+
+            // Empty query: nothing happens.
+            _ = try search(pane, "")
+            controls.bar.onReplaceAll?()
+            try expectEqual(doc.textStorage.string, "Apple banana pear cherry APPLE")
+        }
+
+        testRunner("EditorPane moveCaret goes to the start of a 1-based line, clamped to the text") {
+            let (pane, doc) = makePane("Line 1\nLine 2\nLine 3\n")
             pane.moveCaret(toLine: 1)
-            assert(pane.textView.selectedRange.location == 0)
-
+            try expectEqual(pane.textView.selectedRange(), NSRange(location: 0, length: 0))
             pane.moveCaret(toLine: 3)
-            let line3Loc = (doc.textStorage.string as NSString).range(of: "Line 3").location
-            assert(pane.textView.selectedRange.location == line3Loc)
-
+            try expectEqual(pane.textView.selectedRange().location, 14)
+            pane.moveCaret(toLine: 4)
+            try expectEqual(pane.textView.selectedRange().location, 21, "the empty line after the final newline")
             pane.moveCaret(toLine: 100)
-            assert(pane.textView.selectedRange.location == doc.textStorage.length)
+            try expectEqual(pane.textView.selectedRange().location, doc.textStorage.length)
+            pane.moveCaret(toLine: Int.max)
+            try expectEqual(pane.textView.selectedRange().location, doc.textStorage.length)
+            pane.moveCaret(toLine: 0)
+            try expectEqual(pane.textView.selectedRange().location, 0)
+            pane.moveCaret(toLine: -5)
+            try expectEqual(pane.textView.selectedRange().location, 0)
 
-            // Hosting in a window
-            let winCtrl = EditorWindowController()
-            winCtrl.add(doc)
-            pane.goToLine(nil)
-            winCtrl.close()
+            let (empty, _) = makePane("")
+            empty.moveCaret(toLine: 5)
+            try expectEqual(empty.textView.selectedRange().location, 0)
+        }
+
+        testRunner("EditorPane goToLine asks for a line in a sheet") {
+            let (orphan, _) = makePane("x")
+            orphan.goToLine(nil)   // not in a window: nothing to attach a sheet to
+
+            let doc = TextDocument()
+            doc.textStorage.mutableString.setString("Line 1\nLine 2\nLine 3")
+            let controller = EditorWindowController()
+            controller.add(doc)
+            controller.showWindow(nil)
+            let window = try unwrap(controller.window)
+            let pane = try unwrap(controller.selectedPane)
+
+            func answer(_ text: String, button: String) throws {
+                pane.goToLine(nil)
+                guard TestSupport.spin(until: { window.attachedSheet != nil }), let sheet = window.attachedSheet,
+                      let content = sheet.contentView else {
+                    throw TestFailure(description: "the Go to Line sheet did not appear")
+                }
+                let field = try unwrap(TestSupport.findSubview(NSTextField.self, in: content) { $0.placeholderString == "Line number" })
+                field.stringValue = text
+                try unwrap(TestSupport.findSubview(NSButton.self, in: content) { $0.title == button }).performClick(nil)
+                try expect(TestSupport.spin { window.attachedSheet == nil })
+            }
+
+            pane.textView.setSelectedRange(NSRange(location: 0, length: 0))
+            try answer(" 2 ", button: "Go")
+            try expectEqual(pane.textView.selectedRange().location, 7)
+            try answer("3", button: "Cancel")
+            try expectEqual(pane.textView.selectedRange().location, 7, "cancel does not move")
+            try answer("abc", button: "Go")
+            try expectEqual(pane.textView.selectedRange().location, 7, "not a number")
+            try answer("0", button: "Go")
+            try expectEqual(pane.textView.selectedRange().location, 7, "lines start at 1")
+            try answer("3", button: "Go")
+            try expectEqual(pane.textView.selectedRange().location, 14)
         }
     }
 }

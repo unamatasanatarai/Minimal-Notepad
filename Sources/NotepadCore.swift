@@ -106,7 +106,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         showQuitHint()
     }
 
-    func showQuitHint() {
+    /// A stretchable rounded-rect mask. NSVisualEffectView ignores layer.cornerRadius for its material and for the
+    /// window shadow, which leaves a square outline around the rounded shape; a mask image clips both.
+    static func roundedMask(radius: CGFloat) -> NSImage {
+        let edge = radius * 2 + 1
+        let image = NSImage(size: NSSize(width: edge, height: edge), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            return true
+        }
+        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
+        image.resizingMode = .stretch
+        return image
+    }
+
+    @discardableResult
+    func showQuitHint() -> NSPanel {
         let message = "Press ⌘Q again to quit"
         let label = NSTextField(labelWithString: message)
         label.font = NSFont.systemFont(ofSize: 15, weight: .medium)
@@ -115,8 +130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let background = NSVisualEffectView()
         background.material = .hudWindow
         background.state = .active
-        background.wantsLayer = true
-        background.layer?.cornerRadius = 10
+        background.maskImage = AppDelegate.roundedMask(radius: 10)
         background.addSubview(label)
         NSLayoutConstraint.activate([
             label.centerXAnchor.constraint(equalTo: background.centerXAnchor),
@@ -133,12 +147,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if let frame = NSApp.mainWindow?.frame ?? NSScreen.main?.visibleFrame {
             panel.setFrameOrigin(NSPoint(x: frame.midX - size.width / 2, y: frame.midY - size.height / 2))
         }
+        panel.hasShadow = true
         panel.orderFrontRegardless()
+        panel.invalidateShadow()   // recompute the shadow from the masked (rounded) content
         NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested, userInfo: [
             .announcement: "Press Command Q again to quit",
             .priority: NSAccessibilityPriorityLevel.high.rawValue
         ])
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { panel.orderOut(nil) }
+        return panel
     }
 
     /// ⌘N opens a new window; ⌘T (newDocument:) opens a new tab in the front window.
@@ -182,6 +199,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     @objc func showKeyboardShortcuts(_ sender: Any?) {
+        makeKeyboardShortcutsAlert().runModal()
+    }
+
+    func makeKeyboardShortcutsAlert() -> NSAlert {
         let alert = NSAlert()
         alert.messageText = "Keyboard Shortcuts"
         alert.informativeText = """
@@ -197,7 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         ⌘+  Zoom In             ⌘−  Zoom Out
         ⌘0  Actual Size         ⌃⌘F  Full Screen
         """
-        alert.runModal()
+        return alert
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -333,18 +354,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 // MARK: - Document Controller
 
 final class DocumentController: NSDocumentController {
+    /// Files above this size (in bytes, as Finder counts them) open only after a warning.
+    var largeFileWarningSize: Int64 = 200_000_000
+
+    /// Asks whether to open a large file; replaceable so tests are not blocked by an app-modal alert.
+    var confirmLargeFile: (URL, Int64) -> Bool = { url, size in
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "“\(url.lastPathComponent)” is \(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))."
+        alert.informativeText = "Large files can take a while to open and use a lot of memory. Open it anyway?"
+        alert.addButton(withTitle: "Open")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     // Open the symlink target, so saving updates the real file instead of replacing the link with a copy.
     override func openDocument(withContentsOf url: URL, display displayDocument: Bool, completionHandler: @escaping (NSDocument?, Bool, Error?) -> Void) {
-        super.openDocument(withContentsOf: url.resolvingSymlinksInPath(), display: displayDocument, completionHandler: completionHandler)
+        let target = url.resolvingSymlinksInPath()
+        // Warn before opening a large file, unless it is already open (then it is only brought to the front).
+        if document(for: target) == nil,
+           let size = (try? target.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap({ $0 }).map(Int64.init),
+           size > largeFileWarningSize,
+           !confirmLargeFile(target, size) {
+            completionHandler(nil, false, CocoaError(.userCancelled))
+            return
+        }
+        super.openDocument(withContentsOf: target, display: displayDocument, completionHandler: completionHandler)
     }
 
     override var currentDocument: NSDocument? {
         return (NSApp.mainWindow?.windowController as? EditorWindowController)?.selectedPane?.document
     }
 
+    /// How failures from `open(_:)` are reported; replaceable so tests are not blocked by an app-modal alert.
+    var errorPresenter: (Error) -> Void = { NSApp.presentError($0) }
+
     func open(_ url: URL) {
-        openDocument(withContentsOf: url, display: true) { _, _, error in
-            if let error = error { NSApp.presentError(error) }
+        openDocument(withContentsOf: url, display: true) { [weak self] _, _, error in
+            // Declining a prompt (such as the large file warning) is not an error to report.
+            if let error = error, (error as? CocoaError)?.code != .userCancelled { self?.errorPresenter(error) }
         }
     }
 
@@ -464,9 +512,14 @@ final class TextDocument: NSDocument {
 
     static func decode(_ data: Data) -> String {
         if let text = String(data: data, encoding: .utf8) { return text }
-        if data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF]),
-           let text = String(data: data, encoding: .utf16) {
-            return text
+        // UTF-16 only when it decodes losslessly: an odd byte count or broken surrogates would otherwise be
+        // silently dropped or replaced, and saving would then destroy the file's contents.
+        for (bom, encoding) in [([UInt8](arrayLiteral: 0xFF, 0xFE), String.Encoding.utf16LittleEndian), ([0xFE, 0xFF], .utf16BigEndian)]
+        where data.starts(with: bom) {
+            let payload = data.dropFirst(2)
+            if payload.count % 2 == 0, let text = String(data: payload, encoding: encoding), text.data(using: encoding) == payload {
+                return text
+            }
         }
         // macOSRoman maps every byte, so it is the final fallback.
         return String(data: data, encoding: .windowsCP1252)
@@ -514,7 +567,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
     private let content = NSView()
     private(set) var panes: [EditorPane] = []
     private(set) var selectedPane: EditorPane?
-    private var closeRequest: CloseRequest?
+    /// Pending close prompts. NSDocument does not retain its delegate, and several can be pending at once.
+    private(set) var closeRequests: [CloseRequest] = []
 
     /// The window new tabs open in: the frontmost editor window, or a new one.
     static var front: EditorWindowController {
@@ -642,12 +696,12 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
 
     /// Asks to save if needed, then closes the document (which removes its tab).
     private func close(_ document: NSDocument, then completion: ((Bool) -> Void)? = nil) {
-        let request = CloseRequest { [weak self] shouldClose in
-            self?.closeRequest = nil
+        let request = CloseRequest { shouldClose in
             if shouldClose { document.close() }
             completion?(shouldClose)
         }
-        closeRequest = request
+        request.onFinish = { [weak self] finished in self?.closeRequests.removeAll { $0 === finished } }
+        closeRequests.append(request)
         document.canClose(withDelegate: request, shouldClose: #selector(CloseRequest.document(_:shouldClose:contextInfo:)), contextInfo: nil)
     }
 
@@ -734,6 +788,8 @@ extension EditorWindowController: NSMenuItemValidation {
 /// Bridges NSDocument's selector-based close callback to a closure.
 final class CloseRequest: NSObject {
     private let completion: (Bool) -> Void
+    /// Called after the completion, so the owner can release this request.
+    var onFinish: ((CloseRequest) -> Void)?
 
     init(_ completion: @escaping (Bool) -> Void) {
         self.completion = completion
@@ -741,6 +797,7 @@ final class CloseRequest: NSObject {
 
     @objc func document(_ document: NSDocument, shouldClose: Bool, contextInfo: UnsafeMutableRawPointer?) {
         completion(shouldClose)
+        onFinish?(self)
     }
 }
 
@@ -1188,7 +1245,7 @@ final class EditorTextView: NSTextView {
 }
 
 /// In-window tab bar: tabs share the full width equally down to a minimum width, then the bar scrolls.
-/// Click to select, × to close, drag to reorder.
+/// Click to select, × or middle-click to close, drag to reorder.
 final class TabBarView: NSView {
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
@@ -1198,6 +1255,8 @@ final class TabBarView: NSView {
     private let strip = TabStripView()
     private var tabs: [TabItemView] = []
     private var draggedIndex: Int?
+    /// The tab a middle button press started on; releasing over the same tab closes it.
+    private var middlePressedIndex: Int?
     /// After closing a tab with its ×, tabs keep their width until the pointer leaves the bar,
     /// so a neighbouring tab's × slides under the pointer and repeated clicks keep closing tabs.
     private var frozenTabWidth: CGFloat?
@@ -1220,6 +1279,8 @@ final class TabBarView: NSView {
         ])
         strip.onMouseDown = { [weak self] event in self?.startDrag(event) }
         strip.onMouseDragged = { [weak self] event in self?.continueDrag(event) }
+        strip.onOtherMouseDown = { [weak self] event in self?.middlePress(event) }
+        strip.onOtherMouseUp = { [weak self] event in self?.middleRelease(event) }
         setAccessibilityRole(.tabGroup)
     }
 
@@ -1229,6 +1290,10 @@ final class TabBarView: NSView {
 
     /// Updates tabs in place (only adding or removing views when the count changes), so a drag survives reordering.
     func update(titles: [String], selected: Int?) {
+        if titles.count != tabs.count {   // a drag or middle-click cannot survive tabs appearing or vanishing
+            draggedIndex = nil
+            middlePressedIndex = nil
+        }
         while tabs.count > titles.count {
             tabs.removeLast().removeFromSuperview()
         }
@@ -1304,6 +1369,24 @@ final class TabBarView: NSView {
         return max(0, min(tabs.count - 1, Int(x / tabWidth)))
     }
 
+    /// The tab under the event, or nil over the empty space a frozen layout leaves after the last tab.
+    private func tabUnder(_ event: NSEvent) -> Int? {
+        let x = strip.convert(event.locationInWindow, from: nil).x
+        guard !tabs.isEmpty, x < tabWidth * CGFloat(tabs.count) else { return nil }
+        return tabIndex(at: event)
+    }
+
+    /// Middle-click closes a tab, like in browsers: on release, if the pointer is still over the pressed tab.
+    private func middlePress(_ event: NSEvent) {
+        middlePressedIndex = event.buttonNumber == 2 ? tabUnder(event) : nil
+    }
+
+    private func middleRelease(_ event: NSEvent) {
+        guard event.buttonNumber == 2, let pressed = middlePressedIndex else { return }
+        middlePressedIndex = nil
+        if tabUnder(event) == pressed { closeTab(at: pressed) }
+    }
+
     private func closeTab(at index: Int) {
         frozenTabWidth = tabWidth
         onClose?(index)
@@ -1326,7 +1409,7 @@ final class TabBarView: NSView {
     }
 
     private func continueDrag(_ event: NSEvent) {
-        guard let from = draggedIndex, !tabs.isEmpty else { return }
+        guard let from = draggedIndex, from < tabs.count else { return }
         strip.autoscroll(with: event)
         let to = tabIndex(at: event)
         if to != from {
@@ -1347,6 +1430,8 @@ final class TabBarView: NSView {
 final class TabStripView: NSView {
     var onMouseDown: ((NSEvent) -> Void)?
     var onMouseDragged: ((NSEvent) -> Void)?
+    var onOtherMouseDown: ((NSEvent) -> Void)?
+    var onOtherMouseUp: ((NSEvent) -> Void)?
 
     override var isFlipped: Bool {
         return true
@@ -1358,6 +1443,14 @@ final class TabStripView: NSView {
 
     override func mouseDragged(with event: NSEvent) {
         onMouseDragged?(event)
+    }
+
+    override func otherMouseDown(with event: NSEvent) {
+        onOtherMouseDown?(event)
+    }
+
+    override func otherMouseUp(with event: NSEvent) {
+        onOtherMouseUp?(event)
     }
 }
 
@@ -1495,7 +1588,7 @@ final class InvisiblesLayoutManager: NSLayoutManager {
 
 final class LineNumberRuler: NSRulerView {
     /// Character offset of the start of each line. The buffer is LF-only, so only "\n" starts a line.
-    private var lineStarts = [0]
+    private(set) var lineStarts = [0]
     private var lineStartsAreStale = true
     private var font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
 

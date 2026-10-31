@@ -3,212 +3,316 @@ import AppKit
 public enum TextDocumentTests {
     public static func run(testRunner: (String, () throws -> Void) -> Void) {
         testRunner("TextDocument line ending normalization") {
-            // Pure LF
-            let lf = "Alpha\nBeta\nGamma" as NSString
-            assert(TextDocument.normalizeLineEndings(lf) == "Alpha\nBeta\nGamma")
-
-            // CRLF
-            let crlf = "Alpha\r\nBeta\r\nGamma" as NSString
-            assert(TextDocument.normalizeLineEndings(crlf) == "Alpha\nBeta\nGamma")
-
-            // Classic Mac CR
-            let cr = "Alpha\rBeta\rGamma" as NSString
-            assert(TextDocument.normalizeLineEndings(cr) == "Alpha\nBeta\nGamma")
-
-            // Mixed CR, CRLF, LF
-            let mixed = "Alpha\r\nBeta\rGamma\nDelta\r\n" as NSString
-            assert(TextDocument.normalizeLineEndings(mixed) == "Alpha\nBeta\nGamma\nDelta\n")
-
-            // Empty string
-            let empty = "" as NSString
-            assert(TextDocument.normalizeLineEndings(empty) == "")
-
-            // String without newlines
-            let singleLine = "Single line of text without breaks" as NSString
-            assert(TextDocument.normalizeLineEndings(singleLine) == "Single line of text without breaks")
+            try expectEqual(TextDocument.normalizeLineEndings("Alpha\nBeta\nGamma"), "Alpha\nBeta\nGamma")
+            try expectEqual(TextDocument.normalizeLineEndings("Alpha\r\nBeta\r\nGamma"), "Alpha\nBeta\nGamma")
+            try expectEqual(TextDocument.normalizeLineEndings("Alpha\rBeta\rGamma"), "Alpha\nBeta\nGamma")
+            try expectEqual(TextDocument.normalizeLineEndings("Alpha\r\nBeta\rGamma\nDelta\r\n"), "Alpha\nBeta\nGamma\nDelta\n")
+            try expectEqual(TextDocument.normalizeLineEndings(""), "")
+            try expectEqual(TextDocument.normalizeLineEndings("No breaks"), "No breaks")
+            // A CR immediately before a CRLF is its own line break; a trailing lone CR becomes LF.
+            try expectEqual(TextDocument.normalizeLineEndings("a\r\r\nb\r"), "a\n\nb\n")
+            // LF followed by CR is two breaks, not one.
+            try expectEqual(TextDocument.normalizeLineEndings("a\n\rb"), "a\n\nb")
         }
 
-        testRunner("TextDocument data decoding encodings and fallbacks") {
-            // UTF-8
-            let utf8Str = "Hello Swift ⚡️ World!"
-            let utf8Data = Data(utf8Str.utf8)
-            assert(TextDocument.decode(utf8Data) == utf8Str)
+        testRunner("TextDocument.decode picks the right encoding for each input") {
+            try expectEqual(TextDocument.decode(Data("Hello ⚡️ World".utf8)), "Hello ⚡️ World")
+            try expectEqual(TextDocument.decode(Data()), "")
 
-            // UTF-16 LE with BOM (0xFF, 0xFE)
-            let utf16LEStr = "UTF16 Little Endian"
-            var utf16LEData = Data([0xFF, 0xFE])
-            utf16LEData.append(utf16LEStr.data(using: .utf16LittleEndian)!)
-            assert(TextDocument.decode(utf16LEData) == utf16LEStr)
+            var utf16LE = Data([0xFF, 0xFE])
+            utf16LE.append("UTF16 LE ż".data(using: .utf16LittleEndian)!)
+            try expectEqual(TextDocument.decode(utf16LE), "UTF16 LE ż")
 
-            // UTF-16 BE with BOM (0xFE, 0xFF)
-            let utf16BEStr = "UTF16 Big Endian"
-            var utf16BEData = Data([0xFE, 0xFF])
-            utf16BEData.append(utf16BEStr.data(using: .utf16BigEndian)!)
-            assert(TextDocument.decode(utf16BEData) == utf16BEStr)
+            var utf16BE = Data([0xFE, 0xFF])
+            utf16BE.append("UTF16 BE ż".data(using: .utf16BigEndian)!)
+            try expectEqual(TextDocument.decode(utf16BE), "UTF16 BE ż")
 
-            // Windows CP1252 (e.g. 0x80 is Euro sign '€')
-            let cp1252Data = Data([0x80, 0x61, 0x62])
-            let decoded1252 = TextDocument.decode(cp1252Data)
-            assert(!decoded1252.isEmpty)
-
-            // macOSRoman fallback
-            let romanData = Data([0xA5, 0x61, 0x62]) // bullet •
-            let decodedRoman = TextDocument.decode(romanData)
-            assert(!decodedRoman.isEmpty)
-
-            // Arbitrary raw bytes
-            let rawBytes = Data([0xC0, 0xC1, 0xF5, 0xFF])
-            let decodedRaw = TextDocument.decode(rawBytes)
-            assert(!decodedRaw.isEmpty)
+            // Invalid UTF-8 that is valid Windows-1252: 0x80 is the euro sign.
+            try expectEqual(TextDocument.decode(Data([0x80, 0x61, 0x62])), "€ab")
+            // 0x81 is undefined in Windows-1252, so Mac Roman (which maps every byte) is used.
+            try expectEqual(TextDocument.decode(Data([0x81, 0x61])), "Åa")
+            // Never empty for non-empty input, whatever the bytes.
+            try expect(!TextDocument.decode(Data([0xC0, 0xC1, 0xF5, 0xFF])).isEmpty)
+            // A UTF-8 BOM is kept as U+FEFF, so saving writes it back unchanged.
+            try expectEqual(TextDocument.decode(Data([0xEF, 0xBB, 0xBF, 0x61])).unicodeScalars.first?.value, 0xFEFF)
+            // BOM bytes that are not followed by valid UTF-16 must not lose data (this used to decode to "",
+            // or drop the last byte, so saving destroyed the file). They fall back to a byte-preserving encoding.
+            try expectEqual(TextDocument.decode(Data([0xFF, 0xFE, 0x41])), "ÿþA")
+            try expectEqual(TextDocument.decode(Data([0xFF, 0xFE, 0x41, 0x00, 0x42])).count, 5, "odd length keeps every byte")
+            try expect(!TextDocument.decode(Data([0xFF, 0xFE, 0x00, 0xD8])).contains("\u{FFFD}"), "a lone surrogate is not replaced")
+            try expectEqual(TextDocument.decode(Data([0xFF, 0xFE])), "", "BOM only: an empty UTF-16 file")
         }
 
-        testRunner("TextDocument read, line ending detection, and data export") {
+        testRunner("TextDocument detects and restores CRLF, LF and the preference default") {
             let doc = TextDocument()
-            assert(TextDocument.autosavesInPlace == false)
-            assert(doc.shouldRunSavePanelWithAccessoryView == false)
+            try expect(TextDocument.autosavesInPlace == false)
+            try expect(doc.shouldRunSavePanelWithAccessoryView == false)
 
-            // Read CRLF content
-            let crlfContent = "Hello\r\nWorld\r\n"
-            try doc.read(from: Data(crlfContent.utf8), ofType: "public.plain-text")
-            assert(doc.textStorage.string == "Hello\nWorld\n")
+            try doc.read(from: Data("Hello\r\nWorld\r\n".utf8), ofType: "public.plain-text")
+            try expectEqual(doc.textStorage.string, "Hello\nWorld\n", "the buffer is LF-only")
+            try expectEqual(String(data: try doc.data(ofType: "public.plain-text"), encoding: .utf8), "Hello\r\nWorld\r\n")
 
-            // Export data: should write out CRLF
-            let exportedCRLF = try doc.data(ofType: "public.plain-text")
-            let exportedStr1 = String(data: exportedCRLF, encoding: .utf8)
-            assert(exportedStr1 == "Hello\r\nWorld\r\n")
+            // A file without any line break keeps the current line ending (CRLF from the previous read).
+            try doc.read(from: Data("single line".utf8), ofType: "public.plain-text")
+            doc.textStorage.mutableString.append("\nadded")
+            try expectEqual(String(data: try doc.data(ofType: "public.plain-text"), encoding: .utf8), "single line\r\nadded")
 
-            // Read LF content
-            let lfContent = "First\nSecond\nThird"
-            try doc.read(from: Data(lfContent.utf8), ofType: "public.plain-text")
-            assert(doc.textStorage.string == "First\nSecond\nThird")
+            try doc.read(from: Data("First\nSecond".utf8), ofType: "public.plain-text")
+            try expectEqual(String(data: try doc.data(ofType: "public.plain-text"), encoding: .utf8), "First\nSecond")
 
-            // Export data: should write out LF
-            let exportedLF = try doc.data(ofType: "public.plain-text")
-            let exportedStr2 = String(data: exportedLF, encoding: .utf8)
-            assert(exportedStr2 == "First\nSecond\nThird")
+            // Mixed CRLF and LF: any CRLF makes the file CRLF, and every line gets CRLF on save.
+            try doc.read(from: Data("a\nb\r\nc".utf8), ofType: "public.plain-text")
+            try expectEqual(String(data: try doc.data(ofType: "public.plain-text"), encoding: .utf8), "a\r\nb\r\nc")
 
-            // Attributes preservation across reload
+            // Classic Mac (CR-only) files are read correctly, but saved with LF.
+            try doc.read(from: Data("a\rb".utf8), ofType: "public.plain-text")
+            try expectEqual(doc.textStorage.string, "a\nb")
+            try expectEqual(String(data: try doc.data(ofType: "public.plain-text"), encoding: .utf8), "a\nb")
+
+            // New documents follow the line ending preference.
+            defaults.set(1, forKey: Pref.lineEnding)
+            let crlfDoc = TextDocument()
+            crlfDoc.textStorage.mutableString.setString("x\ny")
+            try expectEqual(String(data: try crlfDoc.data(ofType: "public.plain-text"), encoding: .utf8), "x\r\ny")
+            defaults.set(0, forKey: Pref.lineEnding)
+            let lfDoc = TextDocument()
+            lfDoc.textStorage.mutableString.setString("x\ny")
+            try expectEqual(String(data: try lfDoc.data(ofType: "public.plain-text"), encoding: .utf8), "x\ny")
+        }
+
+        testRunner("TextDocument data(ofType:) normalizes stray CRs and always writes UTF-8") {
+            let doc = TextDocument()
+            doc.textStorage.mutableString.setString("a\rb\r\nc ż")
+            try expectEqual(try doc.data(ofType: "public.plain-text"), Data("a\nb\nc ż".utf8))
+            // A document read from Windows-1252 is saved as UTF-8 (the original encoding is not kept).
+            try doc.read(from: Data([0x80]), ofType: "public.plain-text")
+            try expectEqual(try doc.data(ofType: "public.plain-text"), Data("€".utf8))
+        }
+
+        testRunner("TextDocument reload keeps attributes and clears undo history") {
+            let doc = TextDocument()
+            try doc.read(from: Data("first".utf8), ofType: "public.plain-text")
             doc.textStorage.addAttribute(.foregroundColor, value: NSColor.red, range: NSRange(location: 0, length: 5))
+            doc.undoManager?.registerUndo(withTarget: doc) { _ in }
+            try expect(doc.undoManager?.canUndo == true)
+
             try doc.read(from: Data("Reloaded text\nLine 2".utf8), ofType: "public.plain-text")
-            assert(doc.textStorage.string == "Reloaded text\nLine 2")
-            if doc.textStorage.length > 0 {
-                let color = doc.textStorage.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
-                assert(color == NSColor.red)
-            }
+            try expectEqual(doc.textStorage.string, "Reloaded text\nLine 2")
+            try expectEqual(doc.textStorage.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor, NSColor.red)
+            try expect(doc.undoManager?.canUndo == false, "reloading from disk is not undoable")
+
+            // Reading into an empty document uses no attributes, and reading empty data empties it.
+            let empty = TextDocument()
+            try empty.read(from: Data("x".utf8), ofType: "public.plain-text")
+            try expectEqual(empty.textStorage.string, "x")
+            try empty.read(from: Data(), ofType: "public.plain-text")
+            try expectEqual(empty.textStorage.length, 0)
         }
 
-        testRunner("TextDocument file reading and error handling") {
+        testRunner("TextDocument read(from: URL) accepts regular files and symlinks to them") {
             let doc = TextDocument()
+            let file = try TestSupport.writeFile("Hello From File\nLine 2")
+            try doc.read(from: file, ofType: "public.plain-text")
+            try expectEqual(doc.textStorage.string, "Hello From File\nLine 2")
 
-            // Reading a directory must throw CocoaError.fileReadUnknown
-            let tempDir = URL(fileURLWithPath: NSTemporaryDirectory())
-            var threwExpected = false
-            do {
-                try doc.read(from: tempDir, ofType: "public.plain-text")
-            } catch let error as CocoaError {
-                threwExpected = (error.code == .fileReadUnknown)
-                assert(error.localizedDescription.contains("is not a regular file and cannot be opened"))
-            } catch {
-                threwExpected = false
-            }
-            assert(threwExpected, "Reading directory must fail with CocoaError.fileReadUnknown")
-
-            // Reading a regular temporary file
-            let tempFile = tempDir.appendingPathComponent("test_read_\(UUID().uuidString).txt")
-            try "Hello From File\nLine 2".write(to: tempFile, atomically: true, encoding: .utf8)
-            defer { try? FileManager.default.removeItem(at: tempFile) }
-
-            try doc.read(from: tempFile, ofType: "public.plain-text")
-            assert(doc.textStorage.string == "Hello From File\nLine 2")
+            let link = file.deletingLastPathComponent().appendingPathComponent("link.txt")
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: file)
+            try doc.read(from: link, ofType: "public.plain-text")
+            try expectEqual(doc.textStorage.string, "Hello From File\nLine 2")
         }
 
-        testRunner("TextDocument tabTitle asterisk indication on edit state") {
+        testRunner("TextDocument read(from: URL) rejects directories, FIFOs, devices and missing files") {
+            let doc = TextDocument()
+            try doc.read(from: Data("unchanged".utf8), ofType: "public.plain-text")
+            let dir = try TestSupport.temporaryDirectory()
+
+            func expectNotRegular(_ url: URL) throws {
+                let error = try expectThrows("\(url.path) must be rejected") { try doc.read(from: url, ofType: "public.plain-text") }
+                try expectEqual((error as? CocoaError)?.code, .fileReadUnknown, "\(error)")
+                try expect(error.localizedDescription.contains("is not a regular file"), error.localizedDescription)
+            }
+
+            try expectNotRegular(dir)
+
+            // A FIFO would block the main thread forever if it were read.
+            let fifo = dir.appendingPathComponent("pipe")
+            try expectEqual(mkfifo(fifo.path, 0o600), 0)
+            try expectNotRegular(fifo)
+
+            // A symlink to a directory is resolved before checking.
+            let dirLink = dir.appendingPathComponent("dirlink")
+            try FileManager.default.createSymbolicLink(at: dirLink, withDestinationURL: dir)
+            try expectNotRegular(dirLink)
+
+            try expectNotRegular(URL(fileURLWithPath: "/dev/null"))
+
+            _ = try expectThrows { try doc.read(from: dir.appendingPathComponent("missing.txt"), ofType: "public.plain-text") }
+            try expectEqual(doc.textStorage.string, "unchanged", "a failed read leaves the buffer alone")
+        }
+
+        testRunner("TextDocument tabTitle marks unsaved changes") {
             let doc = TextDocument()
             let baseTitle = doc.displayName ?? ""
-            assert(doc.tabTitle == baseTitle)
-            assert(!doc.tabTitle.hasPrefix("* "))
+            try expectEqual(doc.tabTitle, baseTitle)
 
             doc.updateChangeCount(.changeDone)
-            assert(doc.isDocumentEdited)
-            assert(doc.tabTitle == "* " + baseTitle)
+            try expect(doc.isDocumentEdited)
+            try expectEqual(doc.tabTitle, "* " + baseTitle)
 
             doc.updateChangeCount(.changeUndone)
-            assert(!doc.isDocumentEdited)
-            assert(doc.tabTitle == baseTitle)
+            try expectEqual(doc.tabTitle, baseTitle)
 
-            // Token-based change count update
+            // A save that started before the latest edit leaves the document edited; one that included it clears it.
+            let staleToken = doc.changeCountToken(for: .saveOperation)
+            doc.updateChangeCount(.changeDone)
+            try expect(doc.tabTitle.hasPrefix("* "))
+            doc.updateChangeCount(withToken: staleToken, for: .saveOperation)
+            try expect(doc.isDocumentEdited, "edits made after the save started are still unsaved")
             let token = doc.changeCountToken(for: .saveOperation)
-            doc.updateChangeCount(.changeDone)
-            assert(doc.tabTitle.hasPrefix("* "))
             doc.updateChangeCount(withToken: token, for: .saveOperation)
+            try expect(!doc.isDocumentEdited)
+            try expectEqual(doc.tabTitle, baseTitle)
         }
 
-        testRunner("TextDocument prepareSavePanel and printOperation") {
+        testRunner("TextDocument change count and fileURL changes refresh the host window title") {
+            let controller = EditorWindowController()
             let doc = TextDocument()
-            doc.textStorage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "Printable content line 1\nLine 2")
+            controller.add(doc)
+            let window = try unwrap(controller.window)
+            try expect(!window.isDocumentEdited)
 
+            doc.updateChangeCount(.changeDone)
+            try expect(window.isDocumentEdited)
+            try expect(window.title.hasPrefix("* "))
+
+            let token = doc.changeCountToken(for: .saveOperation)
+            doc.updateChangeCount(withToken: token, for: .saveOperation)
+            try expect(!window.isDocumentEdited)
+
+            let url = try TestSupport.writeFile("x", named: "renamed.txt")
+            doc.fileURL = url
+            try expectEqual(window.representedURL, url)
+            try expectEqual(window.title, "renamed.txt")
+        }
+
+        testRunner("TextDocument prepareSavePanel allows any extension") {
+            let doc = TextDocument()
             let savePanel = NSSavePanel()
-            let allowed = doc.prepareSavePanel(savePanel)
-            assert(allowed == true)
-            assert(savePanel.allowedContentTypes.isEmpty)
-            assert(savePanel.allowsOtherFileTypes == true)
-
-            let printOp = try doc.printOperation(withSettings: [:])
-            assert(printOp.view != nil)
-            assert(printOp.printInfo.horizontalPagination == .fit)
-            assert(printOp.printInfo.isVerticallyCentered == false)
-            if let tv = printOp.view as? NSTextView {
-                assert(tv.string == "Printable content line 1\nLine 2")
-                assert(tv.textColor == .black)
-                assert(tv.drawsBackground == false)
-            }
+            try expect(doc.prepareSavePanel(savePanel))
+            try expect(savePanel.allowedContentTypes.isEmpty)
+            try expect(savePanel.allowsOtherFileTypes)
         }
 
-        testRunner("TextDocument saveIfWanted branching logic") {
+        testRunner("TextDocument printOperation prints black text at page width, independent of the editor") {
             let doc = TextDocument()
-            let originalSaveOnFocus = defaults.bool(forKey: Pref.saveOnFocusLost)
-            defer { defaults.set(originalSaveOnFocus, forKey: Pref.saveOnFocusLost) }
+            doc.textStorage.mutableString.setString("Printable content line 1\nLine 2")
+            let operation = try doc.printOperation(withSettings: [:])
+            try expectEqual(operation.printInfo.horizontalPagination, .fit)
+            try expect(!operation.printInfo.isVerticallyCentered)
+            let view = try unwrap(operation.view as? NSTextView)
+            try expectEqual(view.string, "Printable content line 1\nLine 2")
+            try expectEqual(view.textColor, .black)
+            try expect(!view.drawsBackground)
+            try expectEqual(view.font?.pointSize, 10)
+            let info = operation.printInfo
+            try expectEqual(view.frame.width, info.paperSize.width - info.leftMargin - info.rightMargin)
+            try expect(view.frame.height > 0, "sized to fit its text")
+        }
 
-            // Branch 1: Pref.saveOnFocusLost is false
-            defaults.set(false, forKey: Pref.saveOnFocusLost)
-            doc.fileURL = URL(fileURLWithPath: "/tmp/sample.txt")
-            doc.updateChangeCount(.changeDone)
-            doc.saveIfWanted() // Should early return without saving
+        testRunner("TextDocument saveIfWanted saves only an edited, file-backed document with no sheet up") {
+            let doc = try makeFileDocument("original")
+            let url = try unwrap(doc.fileURL)
+            let controller = EditorWindowController()
+            controller.add(doc)
+            let window = try unwrap(controller.window)
 
-            // Branch 2: fileURL is nil
-            defaults.set(true, forKey: Pref.saveOnFocusLost)
-            doc.fileURL = nil
-            doc.updateChangeCount(.changeDone)
-            doc.saveIfWanted() // Should early return without saving
-
-            // Branch 3: !isDocumentEdited
-            doc.fileURL = URL(fileURLWithPath: "/tmp/sample.txt")
-            doc.updateChangeCount(.changeCleared)
-            doc.saveIfWanted() // Should early return without saving
-
-            // Branch 4: window attachedSheet != nil
-            let windowController = EditorWindowController()
-            windowController.add(doc)
-            assert(doc.host === windowController)
-
-            // Branch 5: windowForSheet selection
-            let sheetWin = doc.windowForSheet
-            assert(sheetWin === windowController.window)
-
-            // Document lifecycle showWindows, makeWindowControllers, canClose, close
-            doc.makeWindowControllers()
-            doc.showWindows()
-
-            var shouldCloseCalled = false
-            let closeRequest = CloseRequest { success in
-                shouldCloseCalled = true
+            func edit(_ text: String) {
+                doc.textStorage.mutableString.setString(text)
+                doc.updateChangeCount(.changeDone)
             }
-            doc.canClose(withDelegate: closeRequest, shouldClose: #selector(CloseRequest.document(_:shouldClose:contextInfo:)), contextInfo: nil)
-            assert(shouldCloseCalled)
+            func fileContents() throws -> String { return try String(contentsOf: url, encoding: .utf8) }
+
+            // Preference off: nothing is saved.
+            defaults.set(false, forKey: Pref.saveOnFocusLost)
+            edit("pref off")
+            doc.saveIfWanted()
+            TestSupport.drain(0.2)
+            try expectEqual(try fileContents(), "original")
+
+            // A sheet is up: nothing is saved (the save must not race a prompt).
+            defaults.set(true, forKey: Pref.saveOnFocusLost)
+            let sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
+            window.beginSheet(sheet)
+            if window.attachedSheet != nil {
+                doc.saveIfWanted()
+                TestSupport.drain(0.2)
+                try expectEqual(try fileContents(), "original")
+                window.endSheet(sheet)
+            }
+
+            // Not edited: nothing to save.
+            doc.updateChangeCount(.changeCleared)
+            doc.saveIfWanted()
+            TestSupport.drain(0.2)
+            try expectEqual(try fileContents(), "original")
+
+            // All conditions met: the document is written to its file.
+            edit("saved on focus lost")
+            doc.saveIfWanted()
+            try expect(TestSupport.spin { (try? fileContents()) == "saved on focus lost" }, "file was not saved")
+            try expect(TestSupport.spin { !doc.isDocumentEdited })
+
+            // Untitled document: never saved (that would need a save panel).
+            let untitled = TextDocument()
+            untitled.updateChangeCount(.changeDone)
+            untitled.saveIfWanted()
+            try expect(untitled.fileURL == nil)
+        }
+
+        testRunner("TextDocument window lifecycle: showWindows, windowForSheet, canClose and close") {
+            let doc = TextDocument()
+            try expect(doc.windowForSheet == nil, "a document without a tab has no sheet window")
+            doc.makeWindowControllers()
+            try expect(doc.windowControllers.isEmpty, "documents never own window controllers")
+
+            // showWindows puts a hostless document into a window.
+            doc.showWindows()
+            let host = try unwrap(doc.host)
+            try expect(host.pane(for: doc) != nil)
+
+            // windowForSheet selects the document's tab, without saving the tab it leaves.
+            let other = TextDocument()
+            host.add(other)
+            try expect(host.selectedPane?.document === other)
+            try expect(doc.windowForSheet === host.window)
+            try expect(host.selectedPane?.document === doc)
+
+            // showWindows on a hosted document selects its tab in the same window.
+            other.showWindows()
+            try expect(other.host === host)
+            try expect(host.selectedPane?.document === other)
+
+            var shouldClose: Bool?
+            let request = CloseRequest { shouldClose = $0 }
+            doc.canClose(withDelegate: request, shouldClose: #selector(CloseRequest.document(_:shouldClose:contextInfo:)), contextInfo: nil)
+            try expect(TestSupport.spin { shouldClose != nil })
+            try expectEqual(shouldClose, true, "a clean document can close")
 
             doc.close()
-            assert(windowController.pane(for: doc) == nil)
-            assert(windowController.panes.isEmpty)
+            try expect(host.pane(for: doc) == nil)
+            try expectEqual(host.panes.count, 1)
+        }
+
+        testRunner("TextDocument canClose discards changes without asking when confirmation is off") {
+            defaults.set(false, forKey: Pref.confirmClose)
+            let doc = TextDocument()
+            doc.updateChangeCount(.changeDone)
+            var shouldClose: Bool?
+            let request = CloseRequest { shouldClose = $0 }
+            doc.canClose(withDelegate: request, shouldClose: #selector(CloseRequest.document(_:shouldClose:contextInfo:)), contextInfo: nil)
+            try expect(TestSupport.spin { shouldClose != nil })
+            try expectEqual(shouldClose, true)
+            try expect(!doc.isDocumentEdited)
         }
     }
 }

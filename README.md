@@ -44,7 +44,7 @@ When you only need to inspect a log file, jot down immediate thoughts, or manipu
 ## Key Capabilities
 
 ### ⚡ Native Tabs and Windows
-Documents open as tabs inside the window: one real window however many tabs it holds, so tiling window managers such as yabai treat a new tab as a tab, not as a new window. Drag tabs to reorder them, move a tab into its own window, or merge windows back together. `⌘T` opens a new tab and `⌘N` a new window. Each document keeps its own undo history, caret position, zoom and word-wrap setting.
+Documents open as tabs inside the window: one real window however many tabs it holds, so tiling window managers such as yabai treat a new tab as a tab, not as a new window. Drag tabs to reorder them, middle-click a tab to close it, move a tab into its own window, or merge windows back together. `⌘T` opens a new tab and `⌘N` a new window. Each document keeps its own undo history, caret position, zoom and word-wrap setting.
 
 ### 💾 Safe Persistence with Unsaved-Change Protection
 Edited documents show an asterisk before their name in the tab and window title (untitled ones too), and undoing back to the saved state clears it. Closing or quitting prompts before discarding work, Close All leaves one empty document just like a fresh launch, and quitting needs `⌘Q` pressed twice so a stray keystroke never closes everything. Saving preserves the file's permissions and saves through symbolic links to the real file.
