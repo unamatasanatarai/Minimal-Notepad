@@ -2,7 +2,7 @@
 
 A lightweight, distraction-free native macOS plain text editor built for immediate launch and frictionless writing without runtime bloat.
 
-Minimal Notepad is a zero-configuration text editor engineered with native AppKit and TextKit 1. It delivers an instant-launch plain text canvas with robust encoding resilience, in-memory search and replace, and direct filesystem persistence—designed to get out of your way and let you focus entirely on your words and code.
+Minimal Notepad is a zero-configuration text editor engineered with native AppKit and TextKit 1. It delivers an instant-launch plain text canvas with robust encoding resilience, tabs, search and replace, and native macOS document handling—designed to get out of your way and let you focus entirely on your words and code.
 
 <p align="center">
   <img src="Resources/MinimalNotepad.iconset/icon_256x256.png" alt="Minimal Notepad App Icon" width="128" height="128" />
@@ -43,34 +43,43 @@ When you only need to inspect a log file, jot down immediate thoughts, or manipu
 
 ## Key Capabilities
 
-### ⚡ Instant Single-Window Architecture
-Opens straight into an active editor window using a single-process AppKit lifecycle. All file interactions, document resets, and external drag-and-drop actions recycle the existing window canvas cleanly without spawning unmanaged windows or background helper processes.
+### ⚡ Native Tabs and Windows
+Documents open as tabs inside the window: one real window however many tabs it holds, so tiling window managers such as yabai treat a new tab as a tab, not as a new window. Drag tabs to reorder them, move a tab into its own window, or merge windows back together. `⌘T` opens a new tab and `⌘N` a new window. Each document keeps its own undo history, caret position, zoom and word-wrap setting.
 
-### 🛡️ Resilient Encoding Fallback Engine
-Opens arbitrary file types safely using a multi-stage encoding detection pipeline. If standard `UTF-8` parsing fails, the engine tries `UTF-16` (when a byte-order mark is present), then `Windows-CP1252`, and finally `macOS Roman`, which accepts any byte sequence, preventing window freezes or read crashes on legacy files.
+### 💾 Safe Persistence with Unsaved-Change Protection
+Edited documents show an asterisk before their name in the tab and window title (untitled ones too), and undoing back to the saved state clears it. Closing or quitting prompts before discarding work, Close All leaves one empty document just like a fresh launch, and quitting needs `⌘Q` pressed twice so a stray keystroke never closes everything. Saving preserves the file's permissions and saves through symbolic links to the real file.
 
-### 🔍 Integrated Linear Search & Batch Replace
-Access an inline query drawer via `Cmd + F` built directly into the window stack. Perform instant literal string queries with real-time match tracking, wrap-around navigation, single occurrence substitution, and full document bulk replacements.
+### 🔁 Session Restore and Open Recent
+Files that were open when you quit reopen on the next launch. File ▸ Open Recent and the Dock menu list recently used documents.
 
-### 💾 Safe Persistence with Dirty-State Protection
-Visual change indicators keep you informed in real time: an asterisk (`*`) prefixes the active file name in the top title bar and activates the native macOS unsaved document indicator. Modifying or closing the buffer prompts a native confirmation sheet to prevent accidental data loss.
+### 🔍 Find, Replace and Go to Line
+`⌘F` opens an inline search bar that highlights every match and shows the match count ("3 of 12"). Use `⌘G` / `⇧⌘G` (or Return / Shift-Return) to step forward and backward, toggle **Match Case**, replace one match or all of them, and jump to any line with `⌘L`.
 
-### 📂 Seamless Drag-and-Drop Ingestion
-Drop files directly from Finder onto the editor canvas. The system automatically inspects filesystem references, resolves symbolic links down to their target paths, and rejects directories, pipes, and devices with informative native alerts.
+### 🖥️ Display Options
+Toggle word wrap (with horizontal scrolling when it is off), line numbers (on by default) and invisible characters, which show spaces, tabs and line breaks as dimmed `·`, `→` and `↵`. Zoom with `⌘+`, `⌘-` and `⌘0`. The editor follows the system light/dark appearance, or you can force Light or Dark in Settings.
 
-### 🖨️ Native System Print Integration
-Generate standard paginated print operations using the system printing pipeline via `Cmd + P`, supporting physical printer output, preview formatting, and direct PDF generation.
+### 🛡️ Resilient Encoding and Line Endings
+Opens any regular file, with or without an extension. Text is read as `UTF-8`, falling back to `UTF-16` (when a byte-order mark is present), `Windows-CP1252` and finally `macOS Roman`. Files are saved as UTF-8. Line endings are normalized to LF while editing, and CRLF files are written back with CRLF. New documents use the default line ending chosen in Settings.
+
+### 📂 Drag and Drop
+Drop files from Finder onto the editor or the Dock icon to open them in tabs. Dragging selected text within the editor moves it as usual. Directories, pipes and devices are rejected with a clear message.
+
+### ⚙️ Settings (`⌘,`)
+Appearance (System / Light / Dark), default line endings, default word wrap, restore previous session, confirm before closing unsaved documents, and optionally save documents when their tab or window loses focus (documents that already have a file).
+
+### 🖨️ Printing
+`⌘P` prints the document in black on white at page width, independent of on-screen zoom and appearance, with the native print and PDF dialog.
 
 ---
 
 ## Product Experience
 
 ```text
-1. Launch ─────────► Opens instantly into an empty, focused plain-text canvas
-2. Draft / Drop ───► Type freely or drop any file directly onto the editor window
-3. Edit & Search ──► Use Cmd + F for quick literal matching and global replacements
-4. Title Tracking ─► Watch the top bar reflect live changes with *filename indicators
-5. Save & Print ───► Commit directly to disk with Cmd + S or print via Cmd + P
+1. Launch ─────────► Restores your previous session, or opens an empty document
+2. Draft / Drop ───► Type freely, open files with ⌘O, or drop them onto the window
+3. Edit & Search ──► ⌘F to find, ⌘G to step through matches, ⌥⌘F to replace, ⌘L to jump
+4. Organize ───────► ⌘T for a new tab, ⌘N for a new window; drag tabs between windows
+5. Save & Print ───► ⌘S to save, ⌘P to print, ⌘Q twice to quit
 ```
 
 ---
@@ -90,23 +99,26 @@ Generate standard paginated print operations using the system printing pipeline 
 
 ## Keyboard Shortcuts
 
-Minimal Notepad is fully operable through standard native macOS key commands:
-
-| Shortcut | Action | Description |
-| :--- | :--- | :--- |
-| `Cmd + N` | **New File** | Clear buffer and reset document state (prompts if dirty) |
-| `Cmd + O` | **Open...** | Present native system file chooser |
-| `Cmd + S` | **Save** | Overwrite current file or trigger save panel for new drafts |
-| `Cmd + Shift + S` | **Save As...** | Save text buffer to a new filesystem destination |
-| `Cmd + P` | **Print...** | Open native macOS print and PDF export dialog |
-| `Cmd + F` | **Find & Replace** | Open or focus inline search and substitution overlay |
-| `Cmd + Z` | **Undo** | Step backward through text alterations |
-| `Cmd + Shift + Z` | **Redo** | Replay undone text alterations |
-| `Cmd + X` | **Cut** | Cut selected characters to clipboard |
-| `Cmd + C` | **Copy** | Copy selected characters to clipboard |
-| `Cmd + V` | **Paste** | Paste clipboard contents as unformatted plain text |
-| `Cmd + A` | **Select All** | Highlight entire document buffer |
-| `Cmd + Q` | **Quit** | Terminate application (prompts if unsaved changes exist) |
+| Shortcut | Action |
+| :--- | :--- |
+| `⌘N` | New window |
+| `⌘T` | New tab |
+| `⌘O` | Open… |
+| `⌘S` / `⇧⌘S` | Save / Save As… |
+| `⌘W` / `⇧⌘W` / `⌥⌘W` | Close Tab / Close Window / Close All |
+| `⇧⌘[` / `⇧⌘]` | Previous Tab / Next Tab |
+| `⌘P` | Print… |
+| `⌘Q` (twice) | Quit |
+| `⌘Z` / `⇧⌘Z` | Undo / Redo |
+| `⌘X` / `⌘C` / `⌘V` | Cut / Copy / Paste as plain text |
+| `⌘A` | Select All |
+| `⌘F` | Find |
+| `⌥⌘F` | Replace |
+| `⌘G` / `⇧⌘G` | Find Next / Find Previous |
+| `⌘L` | Go to Line |
+| `⌘+` / `⌘-` / `⌘0` | Zoom In / Zoom Out / Actual Size |
+| `⌃⌘F` | Full Screen |
+| `⌘,` | Settings |
 
 ---
 
@@ -160,9 +172,9 @@ make clean
 Minimal Notepad is constructed as a single-binary AppKit application:
 
 * **Language**: Swift
-* **UI Framework**: AppKit (`NSWindow`, `NSStackView`, `NSScrollView`)
-* **Text Engine**: TextKit 1 (`NSTextView`, `NSLayoutManager`, `NSTextStorage`, `NSTextContainer`)
-* **Styling**: Locked Aqua light appearance with native monospaced system typography
+* **Document Model**: AppKit document architecture (`NSDocument`, `NSDocumentController`) with tabs drawn inside a single window
+* **Text Engine**: TextKit 1 (`NSTextView`, `NSLayoutManager`, `NSTextStorage`) with non-contiguous layout for large files
+* **Styling**: System, Light or Dark appearance with native monospaced system typography
 * **Packaging**: Standard macOS `.app` bundle generated via shell and GNU Make
 
 ---
