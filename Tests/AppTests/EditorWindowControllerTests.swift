@@ -180,6 +180,30 @@ public enum EditorWindowControllerTests {
             try expect(second.window?.isVisible != true && third.window?.isVisible != true)
         }
 
+        testRunner("EditorWindowController merging keeps the current tab selected and appends the others in order") {
+            let (first, docs) = makeWindow(2)
+            first.select(first.pane(for: docs[0]))
+            let (_, otherDocs) = makeWindow(3)
+            first.mergeAllWindows(nil)
+            try expect(first.selectedPane?.document === docs[0], "the tab you were on stays selected")
+            try expectEqual(order(first), (docs + otherDocs).map(ObjectIdentifier.init))
+            try expect(first.panes.filter { $0.superview != nil }.count == 1, "only the selected pane is shown")
+            try expect(TestSupport.tabBar(of: first)?.isHidden == false)
+        }
+
+        testRunner("EditorWindowController ignores out-of-range indexes from the tab bar") {
+            let (controller, docs) = makeWindow(2)
+            let tabBar = try unwrap(TestSupport.tabBar(of: controller))
+            tabBar.onSelect?(5)
+            tabBar.onSelect?(-1)
+            tabBar.onClose?(2)
+            tabBar.onMove?(0, 9)
+            tabBar.onMove?(-1, 0)
+            TestSupport.drain()
+            try expectEqual(order(controller), docs.map(ObjectIdentifier.init))
+            try expect(controller.selectedPane?.document === docs[1])
+        }
+
         testRunner("EditorWindowController menu validation") {
             let (controller, _) = makeWindow(1)
             let item = { (action: Selector) in NSMenuItem(title: "", action: action, keyEquivalent: "") }
@@ -258,6 +282,8 @@ public enum EditorWindowControllerTests {
             controller.select(controller.pane(for: doc))
             controller.select(controller.panes[1])
             try expect(TestSupport.spin { (try? String(contentsOf: url, encoding: .utf8)) == "v3" }, "saved when leaving the tab")
+            TestSupport.drain(0.2)
+            try expect(controller.selectedPane === controller.panes[1], "saving the tab you left must not switch back to it")
         }
 
         testRunner("EditorWindowController windowWillClose detaches panes from document storage") {

@@ -270,6 +270,30 @@ public enum EditorPaneTests {
             try expectEqual(doc.textStorage.string, "apple banana apple cherry apple")
         }
 
+        testRunner("EditorPane replace never touches text that stopped matching after a revert or reload") {
+            let (pane, doc) = try makeHostedPane("apple pie")
+            let controls = try search(pane, "apple", replace: "pear")
+            try expectEqual(pane.textView.selectedRange(), NSRange(location: 0, length: 5))
+            // Revert to Saved / reload from disk replaces the storage directly, not through the text view.
+            try doc.read(from: Data("zzzzz pie".utf8), ofType: "public.plain-text")
+            pane.textView.setSelectedRange(NSRange(location: 0, length: 5))
+            controls.bar.onReplace?()
+            try expectEqual(doc.textStorage.string, "zzzzz pie", "only real matches may be replaced")
+            try expectEqual(controls.bar.status, "No matches")
+            try expect(pane.textView.findHighlights.isEmpty, "highlights follow the reloaded text")
+        }
+
+        testRunner("EditorPane highlights follow undo and external edits while the search bar is open") {
+            let (pane, doc) = try makeHostedPane("one")
+            _ = try search(pane, "o")
+            try expectEqual(pane.textView.findHighlights.count, 1)
+            doc.textStorage.mutableString.append(" two")   // an edit that bypasses the text view
+            try expect(TestSupport.spin(timeout: 1) { pane.textView.findHighlights.count == 2 })
+            // Attribute-only changes (zooming) do not rescan.
+            pane.zoomIn(nil)
+            try expectEqual(pane.textView.findHighlights.count, 2)
+        }
+
         testRunner("EditorPane replace with text containing the query does not loop on its own output") {
             let (pane, doc) = makePane("a b a")
             let controls = try search(pane, "a", replace: "aa")

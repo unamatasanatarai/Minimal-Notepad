@@ -112,6 +112,26 @@ public enum AppDelegateAndSettingsTests {
             try expectEqual(defaults.stringArray(forKey: Pref.sessionFiles), [], "turning restore off forgets the session")
         }
 
+        testRunner("AppDelegate session keeps documents in minimized windows") {
+            let delegate = launchedDelegate()
+            let shown = try makeFileDocument("1", named: "shown.txt")
+            let hidden = try makeFileDocument("2", named: "hidden.txt")
+            let front = EditorWindowController()
+            front.add(shown)
+            front.showWindow(nil)
+            let offScreen = EditorWindowController()
+            offScreen.add(hidden)
+            offScreen.showWindow(nil)
+            offScreen.window?.miniaturize(nil)
+            TestSupport.spin(timeout: 3) { offScreen.window?.isMiniaturized == true }
+
+            delegate.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+            let session = defaults.stringArray(forKey: Pref.sessionFiles) ?? []
+            try expect(session.contains(hidden.fileURL!.path), "minimized window's file is kept: \(session)")
+            try expect(session.contains(shown.fileURL!.path))
+            try expectEqual(session.count, 2, "no duplicates")
+        }
+
         testRunner("AppDelegate New Window makes a window with one untitled document") {
             let delegate = launchedDelegate()
             let before = TestSupport.editorWindows.count
@@ -250,7 +270,17 @@ public enum AppDelegateAndSettingsTests {
             try expectEqual(recorder.requests, 1, "the first ⌘Q only shows the hint")
             try expect(NSApp.windows.contains { $0 is NSPanel && $0.isVisible }, "hint is visible")
 
+            // Holding ⌘Q down (key repeat) is not a second press.
+            let repeatKey = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: 0,
+                                             context: nil, characters: "q", charactersIgnoringModifiers: "q", isARepeat: true, keyCode: 12)!
+            makeCurrent(repeatKey)
+            try expect(NSApp.currentEvent?.isARepeat == true)
+            delegate.quitRequested(nil)
+            delegate.quitRequested(nil)
+            try expectEqual(recorder.requests, 1, "auto-repeat must not quit")
+
             // Second ⌘Q within 1.5 s: quit.
+            makeCurrent(keyDown)
             delegate.quitRequested(nil)
             try expectEqual(recorder.requests, 2)
         }

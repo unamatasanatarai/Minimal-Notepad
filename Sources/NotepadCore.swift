@@ -97,8 +97,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     // MARK: - Actions
 
     /// ⌘Q must be pressed twice in quick succession; quitting from the menu with the mouse is immediate.
+    /// Holding ⌘Q down is one press: its auto-repeats are ignored, or the key repeat alone would quit.
     @objc func quitRequested(_ sender: Any?) {
-        guard NSApp.currentEvent?.type == .keyDown, Date().timeIntervalSince(lastQuitRequest) > 1.5 else {
+        guard let event = NSApp.currentEvent, event.type == .keyDown else {
+            NSApp.terminate(sender)
+            return
+        }
+        guard !event.isARepeat else { return }
+        guard Date().timeIntervalSince(lastQuitRequest) > 1.5 else {
             NSApp.terminate(sender)
             return
         }
@@ -478,13 +484,28 @@ final class TextDocument: NSDocument {
     }
 
     override func read(from url: URL, ofType typeName: String) throws {
-        // Reject directories, FIFOs and devices, which would fail or block forever when read.
-        guard try url.resolvingSymlinksInPath().resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else {
+        try read(from: TextDocument.readRegularFile(at: url), ofType: typeName)
+    }
+
+    /// Reads a regular file. Directories, FIFOs and devices are rejected: they would fail, or block forever, when read.
+    /// The type is checked on the opened descriptor itself (opened non-blocking, so a FIFO cannot hang the open),
+    /// so the file cannot be swapped for something else between the check and the read.
+    static func readRegularFile(at url: URL) throws -> Data {
+        let descriptor = Darwin.open(url.path, O_RDONLY | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            let code = errno
+            let cocoaCode: CocoaError.Code = code == ENOENT ? .fileReadNoSuchFile : code == EACCES || code == EPERM ? .fileReadNoPermission : .fileReadUnknown
+            throw CocoaError(cocoaCode, userInfo: [NSURLErrorKey: url, NSUnderlyingErrorKey: POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)])
+        }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, info.st_mode & S_IFMT == S_IFREG else {
             throw CocoaError(.fileReadUnknown, userInfo: [
+                NSURLErrorKey: url,
                 NSLocalizedDescriptionKey: "“\(url.lastPathComponent)” is not a regular file and cannot be opened."
             ])
         }
-        try read(from: Data(contentsOf: url), ofType: typeName)
+        return try handle.readToEnd() ?? Data()
     }
 
     override func read(from data: Data, ofType typeName: String) throws {
@@ -575,7 +596,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         return NSApp.orderedWindows.lazy.compactMap { $0.windowController as? EditorWindowController }.first ?? EditorWindowController()
     }
 
-    /// Documents in window and tab order, front window first.
+    /// Documents in window and tab order, front window first (minimized windows included).
     static var orderedDocuments: [TextDocument] {
         let windows = NSApp.orderedWindows.compactMap { $0.windowController as? EditorWindowController }
         return windows.flatMap { $0.panes.map { $0.document } }
@@ -601,10 +622,17 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         window.delegate = self
         EditorWindowController.all.append(self)
 
-        tabBar.onSelect = { [weak self] index in self.map { $0.select($0.panes[index]) } }
-        tabBar.onClose = { [weak self] index in self.map { $0.close($0.panes[index].document) } }
+        // Indexes come from the tab bar, which mirrors `panes`; they are still checked, as an out-of-range index would crash.
+        tabBar.onSelect = { [weak self] index in
+            guard let self = self, self.panes.indices.contains(index) else { return }
+            self.select(self.panes[index])
+        }
+        tabBar.onClose = { [weak self] index in
+            guard let self = self, self.panes.indices.contains(index) else { return }
+            self.close(self.panes[index].document)
+        }
         tabBar.onMove = { [weak self] from, to in
-            guard let self = self else { return }
+            guard let self = self, self.panes.indices.contains(from), self.panes.indices.contains(to) else { return }
             self.panes.insert(self.panes.remove(at: from), at: to)
             self.refreshTitles()
         }
@@ -667,10 +695,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         refreshTitles()
     }
 
-    private func insert(_ pane: EditorPane) {
+    private func insert(_ pane: EditorPane, selecting: Bool = true) {
         panes.append(pane)
         pane.document.host = self
-        select(pane)
+        if selecting { select(pane) } else { refreshTitles() }
     }
 
     private func take(_ pane: EditorPane) {
@@ -689,9 +717,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         tabBar.isHidden = panes.count < 2
         tabBar.update(titles: panes.map { $0.document.tabTitle }, selected: panes.firstIndex { $0 === selectedPane })
         guard let window = window, let document = selectedPane?.document else { return }
-        window.title = document.tabTitle
-        window.representedURL = document.fileURL
-        window.isDocumentEdited = document.isDocumentEdited
+        let title = document.tabTitle
+        if window.title != title { window.title = title }
+        if window.representedURL != document.fileURL { window.representedURL = document.fileURL }
+        if window.isDocumentEdited != document.isDocumentEdited { window.isDocumentEdited = document.isDocumentEdited }
     }
 
     /// Asks to save if needed, then closes the document (which removes its tab).
@@ -739,11 +768,13 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         target.showWindow(nil)
     }
 
+    /// Brings every other window's tabs into this one, keeping the current tab selected
+    /// (selecting each merged tab in turn would swap views, and save on focus loss, once per tab).
     @objc func mergeAllWindows(_ sender: Any?) {
         for other in EditorWindowController.all where other !== self {
             for pane in other.panes {
                 other.take(pane)
-                insert(pane)
+                insert(pane, selecting: selectedPane == nil)
             }
         }
     }
@@ -834,10 +865,18 @@ final class EditorPane: NSView {
         applyWordWrap()
         applySettings()
         NotificationCenter.default.addObserver(self, selector: #selector(applySettings), name: UserDefaults.didChangeNotification, object: nil)
+        // Any change to the text (typing, undo, Revert to Saved, reloading a file changed on disk) makes the
+        // search matches stale; edits that bypass the text view would otherwise leave Replace acting on old ranges.
+        NotificationCenter.default.addObserver(self, selector: #selector(textStorageDidChange), name: NSTextStorage.didProcessEditingNotification, object: document.textStorage)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not supported")
+    }
+
+    @objc private func textStorageDidChange() {
+        guard document.textStorage.editedMask.contains(.editedCharacters), !searchBar.isHidden else { return }
+        scheduleMatchRefresh()
     }
 
     private func setupViews() {
@@ -1032,7 +1071,10 @@ final class EditorPane: NSView {
         let selection = textView.selectedRange()
         let replacement = searchBar.replacement
         let index = matches.firstIndex(endingAfter: selection.location)
-        if index < matches.count, matches[index] == selection, textView.shouldChangeText(in: selection, replacementString: replacement) {
+        let text = document.textStorage.mutableString
+        if index < matches.count, matches[index] == selection, NSMaxRange(selection) <= text.length,
+           text.compare(searchBar.query, options: searchOptions, range: selection) == .orderedSame,
+           textView.shouldChangeText(in: selection, replacementString: replacement) {
             textView.replaceCharacters(in: selection, with: replacement)
             textView.didChangeText()
             // Continue after the inserted text so a replacement containing the query is not matched again.
@@ -1163,10 +1205,6 @@ extension EditorPane: NSTextViewDelegate {
         guard let text = text as NSString?, text.rangeOfCharacter(from: CharacterSet(charactersIn: "\r")).location != NSNotFound else { return true }
         textView.insertText(TextDocument.normalizeLineEndings(text), replacementRange: range)
         return false
-    }
-
-    func textDidChange(_ notification: Notification) {
-        if !searchBar.isHidden { scheduleMatchRefresh() }
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
@@ -1496,13 +1534,16 @@ final class TabItemView: NSView {
         fatalError("init(coder:) is not supported")
     }
 
+    /// Called for every tab whenever any tab's title or the selection changes, so unchanged values are left alone.
     func configure(title: String, isSelected: Bool) {
-        label.stringValue = title
-        label.textColor = isSelected ? .labelColor : .secondaryLabelColor
-        setAccessibilityLabel(title)
-        setAccessibilityValue(isSelected)
-        if self.isSelected != isSelected {
+        if label.stringValue != title {
+            label.stringValue = title
+            setAccessibilityLabel(title)
+        }
+        if self.isSelected != isSelected || accessibilityValue() == nil {
             self.isSelected = isSelected
+            label.textColor = isSelected ? .labelColor : .secondaryLabelColor
+            setAccessibilityValue(isSelected)
             needsDisplay = true
         }
     }

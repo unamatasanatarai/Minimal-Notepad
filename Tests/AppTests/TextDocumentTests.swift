@@ -150,6 +150,32 @@ public enum TextDocumentTests {
             try expectEqual(doc.textStorage.string, "unchanged", "a failed read leaves the buffer alone")
         }
 
+        testRunner("TextDocument.readRegularFile reports why a file cannot be read") {
+            let dir = try TestSupport.temporaryDirectory()
+            let missing = try expectThrows { _ = try TextDocument.readRegularFile(at: dir.appendingPathComponent("nope.txt")) }
+            try expectEqual((missing as? CocoaError)?.code, .fileReadNoSuchFile)
+
+            let locked = try TestSupport.writeFile("secret", named: "locked.txt", in: dir)
+            try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: locked.path) }
+            if getuid() != 0 {   // root can read anything
+                let denied = try expectThrows { _ = try TextDocument.readRegularFile(at: locked) }
+                try expectEqual((denied as? CocoaError)?.code, .fileReadNoPermission)
+            }
+
+            // Empty and binary files read exactly.
+            try expectEqual(try TextDocument.readRegularFile(at: try TestSupport.writeFile(Data(), named: "empty", in: dir)), Data())
+            let bytes = Data((0...255).map { UInt8($0) })
+            try expectEqual(try TextDocument.readRegularFile(at: try TestSupport.writeFile(bytes, named: "bin", in: dir)), bytes)
+
+            // Opening a FIFO returns immediately (non-blocking open) and is rejected.
+            let fifo = dir.appendingPathComponent("fifo")
+            try expectEqual(mkfifo(fifo.path, 0o600), 0)
+            let start = Date()
+            _ = try expectThrows { _ = try TextDocument.readRegularFile(at: fifo) }
+            try expect(Date().timeIntervalSince(start) < 1, "must not wait for a writer")
+        }
+
         testRunner("TextDocument tabTitle marks unsaved changes") {
             let doc = TextDocument()
             let baseTitle = doc.displayName ?? ""
