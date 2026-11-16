@@ -158,6 +158,8 @@ func savePNG(image: NSImage, path: String, pixels: Int) {
     NSGraphicsContext.saveGraphicsState()
     guard let ctx = NSGraphicsContext(bitmapImageRep: rep) else { fatalError() }
     NSGraphicsContext.current = ctx
+    ctx.imageInterpolation = .high
+    ctx.cgContext.interpolationQuality = .high
     image.draw(in: NSRect(x: 0, y: 0, width: pixels, height: pixels), from: .zero, operation: .copy, fraction: 1.0)
     NSGraphicsContext.restoreGraphicsState()
     
@@ -168,7 +170,49 @@ func savePNG(image: NSImage, path: String, pixels: Int) {
     print("Wrote: \(path) (\(pixels)x\(pixels))")
 }
 
-let icon = createIcon(size: 1024)
+let sourcePath = "Resources/Glossy Minimalist Notes App Icon.png"
+
+func loadSourceOrFallback() -> NSImage {
+    if FileManager.default.fileExists(atPath: sourcePath),
+       let sourceImage = NSImage(contentsOfFile: sourcePath),
+       let cgSource = sourceImage.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+        let cropRect = CGRect(x: 116, y: 142, width: 1024, height: 1024)
+        if let cropped = cgSource.cropping(to: cropRect) {
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            var rawData = [UInt8](repeating: 0, count: 1024 * 1024 * 4)
+            if let context = CGContext(
+                data: &rawData,
+                width: 1024,
+                height: 1024,
+                bitsPerComponent: 8,
+                bytesPerRow: 1024 * 4,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+            ) {
+                context.draw(cropped, in: CGRect(x: 0, y: 0, width: 1024, height: 1024))
+                for y in 0..<1024 {
+                    for x in 0..<1024 {
+                        let offset = (y * 1024 + x) * 4
+                        if rawData[offset + 3] <= 1 {
+                            rawData[offset] = 0
+                            rawData[offset + 1] = 0
+                            rawData[offset + 2] = 0
+                            rawData[offset + 3] = 0
+                        }
+                    }
+                }
+                if let cleanedCG = context.makeImage() {
+                    print("Loaded and processed new app icon from \(sourcePath)")
+                    return NSImage(cgImage: cleanedCG, size: NSSize(width: 1024, height: 1024))
+                }
+            }
+        }
+    }
+    print("Using procedural vector fallback icon")
+    return createIcon(size: 1024)
+}
+
+let icon = loadSourceOrFallback()
 let iconsetDir = "Resources/MinimalNotepad.iconset"
 
 let targets: [(String, Int)] = [
