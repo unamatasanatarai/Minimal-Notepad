@@ -18,7 +18,13 @@ dmg_path="${build_dir}/${dmg_name}"
 tmp_dmg="${build_dir}/tmp_rw.dmg"
 
 # Always rebuild so the packaged app matches the current VERSION file.
-"${script_dir}/build.sh"
+# A distributed app is always universal and never carries the local-development signing requirement.
+BUILD_ARCHS="arm64 x86_64" LOCAL_DEV_SIGNING=0 "${script_dir}/build.sh"
+if [[ "$(lipo -archs "${app_bundle}/Contents/MacOS/${APP_NAME}")" != *arm64* ||
+      "$(lipo -archs "${app_bundle}/Contents/MacOS/${APP_NAME}")" != *x86_64* ]]; then
+    printf '%s\n' "Error: ${app_bundle} is not a universal (arm64 + x86_64) binary." >&2
+    exit 1
+fi
 
 app_plist="${app_bundle}/Contents/Info.plist"
 icon_name="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" "$app_plist" 2>/dev/null || true)"

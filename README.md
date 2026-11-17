@@ -59,7 +59,7 @@ Files that were open when you quit reopen on the next launch. File ▸ Open Rece
 Toggle word wrap (with horizontal scrolling when it is off), line numbers (on by default) and invisible characters, which show spaces, tabs and line breaks as dimmed `·`, `→` and `↵`. Zoom with `⌘+`, `⌘-` and `⌘0`. The editor follows the system light/dark appearance, or you can force Light or Dark in Settings.
 
 ### 🛡️ Resilient Encoding and Line Endings
-Opens any regular file, with or without an extension. Text is read as `UTF-8`, falling back to `UTF-16` (when a byte-order mark is present), `Windows-CP1252` and finally `macOS Roman`. Files are saved as UTF-8. Line endings are normalized to LF while editing, and CRLF files are written back with CRLF. New documents use the default line ending chosen in Settings.
+Opens any regular file, with or without an extension. Text is read as `UTF-8`, falling back to `UTF-16` (when a byte-order mark is present), `Windows-CP1252` and finally `macOS Roman`. Saving writes the file back in the encoding, byte-order mark and line endings (LF, CRLF or CR) it was read with, so a file changes only where you edited it. If a save would change more than that (you typed a character the file's encoding cannot hold, so it would become UTF-8, or the file mixes line endings that would be made uniform), Notepad asks first. Files containing NUL bytes are treated as binary: they open read-only and are never rewritten. Files over 50 MB open (or reload) only after a warning. New documents are UTF-8 and use the default line ending chosen in Settings.
 
 ### 📂 Drag and Drop
 Drop files from Finder onto the editor or the Dock icon to open them in tabs. Dragging selected text within the editor moves it as usual. Directories, pipes and devices are rejected with a clear message.
@@ -150,7 +150,7 @@ Appearance (System / Light / Dark), default line endings, default word wrap, res
 
 2. Compile the standalone application bundle:
    ```bash
-   make
+   make build
    ```
 
 3. Launch the compiled application:
@@ -158,7 +158,13 @@ Appearance (System / Light / Dark), default line endings, default word wrap, res
    make run
    ```
 
-The compiled binary and macOS app bundle will be placed in `build/Notepad.app`.
+The compiled binary and macOS app bundle will be placed in `build/Notepad.app`. It is a universal binary that runs natively on both Apple silicon and Intel Macs. For a faster single-architecture build while developing, set `BUILD_ARCHS`, e.g. `BUILD_ARCHS=x86_64 make build`. `make dmg` always builds both architectures.
+
+### Code Signing
+
+* `make build` and `make dmg` sign ad-hoc. macOS ties permissions to that exact build, so they are asked for again after each rebuild, and no other program can inherit them.
+* `make run` pins the signature to the bundle ID so permissions survive rebuilds. This is for local development only: any program signed with the same bundle ID would inherit those permissions, so such builds must never be distributed.
+* For a release, set `SIGN_IDENTITY` to your Developer ID (e.g. `SIGN_IDENTITY="Developer ID Application: Name (TEAMID)" make dmg`) to sign with the hardened runtime. Notarize the DMG with `xcrun notarytool` before publishing.
 
 To clean up build artifacts:
 ```bash

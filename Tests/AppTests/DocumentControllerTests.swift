@@ -92,18 +92,18 @@ public enum DocumentControllerTests {
             try expect(TestSupport.spin { TestSupport.presentedErrors.count == 2 }, "a directory is reported")
         }
 
-        testRunner("DocumentController warns about files over 200 MB, by default") {
-            try expectEqual(DocumentController().largeFileWarningSize, 200_000_000)
-            // A sparse file: the real size, without writing 200 MB to disk.
+        testRunner("DocumentController warns about files over 50 MB, by default") {
+            try expectEqual(DocumentController().largeFileWarningSize, 50_000_000)
+            // A sparse file: the real size, without writing 50 MB to disk.
             let url = try TestSupport.writeFile("", named: "huge.txt")
             let handle = try FileHandle(forWritingTo: url)
-            try handle.truncate(atOffset: 200_000_001)
+            try handle.truncate(atOffset: 50_000_001)
             try handle.close()
             TestSupport.largeFileAnswer = false
             let (document, error) = try open(url)
             try expect(document == nil)
             try expectEqual((error as? CocoaError)?.code, .userCancelled)
-            try expectEqual(TestSupport.largeFilePrompts.map { $0.size }, [200_000_001])
+            try expectEqual(TestSupport.largeFilePrompts.map { $0.size }, [50_000_001])
             try expectEqual(TestSupport.largeFilePrompts.first?.url.path, url.path)
         }
 

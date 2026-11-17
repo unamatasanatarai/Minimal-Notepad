@@ -43,6 +43,9 @@ enum TestSupport {
     /// Large file warnings that would have been shown, and the answer the stand-in prompt gives.
     static var largeFilePrompts: [(url: URL, size: Int64)] = []
     static var largeFileAnswer = true
+    /// Lossy save confirmations that would have been shown (their warnings), and the answer the stand-in gives.
+    static var lossySavePrompts: [[String]] = []
+    static var lossySaveAnswer = true
 
     /// Runs the main run loop until the condition holds or the timeout passes. Returns the condition.
     @discardableResult
@@ -75,12 +78,21 @@ enum TestSupport {
         presentedErrors = []
         documentController.errorPresenter = { TestSupport.presentedErrors.append($0) }
         largeFilePrompts = []
-        documentController.largeFileWarningSize = 200_000_000
+        documentController.largeFileWarningSize = 50_000_000
         documentController.confirmLargeFile = { url, size in
             TestSupport.largeFilePrompts.append((url, size))
             return TestSupport.largeFileAnswer
         }
         largeFileAnswer = true
+        lossySavePrompts = []
+        lossySaveAnswer = true
+        TextDocument.confirmLossySave = { _, warnings, completion in
+            TestSupport.lossySavePrompts.append(warnings)
+            completion(TestSupport.lossySaveAnswer)
+        }
+        EditorPane.synchronousScanLimit = 1_000_000
+        EditorPane.scanWindowLength = 262_144
+        EditorPane.maxMatches = 100_000
         for window in NSApp.windows {
             while let sheet = window.attachedSheet { window.endSheet(sheet, returnCode: .cancel) }
         }

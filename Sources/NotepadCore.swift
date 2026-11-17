@@ -360,8 +360,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 // MARK: - Document Controller
 
 final class DocumentController: NSDocumentController {
-    /// Files above this size (in bytes, as Finder counts them) open only after a warning.
-    var largeFileWarningSize: Int64 = 200_000_000
+    /// Files above this size (in bytes, as Finder counts them) open only after a warning. Opening takes
+    /// several times the file size in memory, and TextKit slows down well before this size.
+    var largeFileWarningSize: Int64 = 50_000_000
 
     /// Asks whether to open a large file; replaceable so tests are not blocked by an app-modal alert.
     var confirmLargeFile: (URL, Int64) -> Bool = { url, size in
@@ -378,14 +379,21 @@ final class DocumentController: NSDocumentController {
     override func openDocument(withContentsOf url: URL, display displayDocument: Bool, completionHandler: @escaping (NSDocument?, Bool, Error?) -> Void) {
         let target = url.resolvingSymlinksInPath()
         // Warn before opening a large file, unless it is already open (then it is only brought to the front).
-        if document(for: target) == nil,
-           let size = (try? target.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap({ $0 }).map(Int64.init),
-           size > largeFileWarningSize,
-           !confirmLargeFile(target, size) {
+        if document(for: target) == nil, !confirmSize(of: target) {
             completionHandler(nil, false, CocoaError(.userCancelled))
             return
         }
         super.openDocument(withContentsOf: target, display: displayDocument, completionHandler: completionHandler)
+    }
+
+    /// Whether a file may be read: true unless it is a regular file over the warning size and the user declines.
+    /// The size comes from stat (following symlinks), never from a URL's cached resource values, which can be stale
+    /// when a file has grown since it was opened.
+    func confirmSize(of url: URL) -> Bool {
+        var info = stat()
+        guard stat(url.path, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { return true }
+        let size = Int64(info.st_size)
+        return size <= largeFileWarningSize || confirmLargeFile(url, size)
     }
 
     override var currentDocument: NSDocument? {
@@ -421,11 +429,74 @@ final class DocumentController: NSDocumentController {
 
 // MARK: - Document
 
+/// A line break style. The editing buffer always uses LF; this is what saving writes.
+enum LineEnding {
+    case lf, crlf, cr
+
+    var string: String {
+        switch self {
+        case .lf: return "\n"
+        case .crlf: return "\r\n"
+        case .cr: return "\r"
+        }
+    }
+
+    var name: String {
+        switch self {
+        case .lf: return "LF"
+        case .crlf: return "CRLF"
+        case .cr: return "CR"
+        }
+    }
+}
+
+/// How many line breaks of each kind a file has.
+struct LineEndingCounts: Equatable {
+    var lf = 0, crlf = 0, cr = 0
+
+    var isMixed: Bool {
+        return [lf, crlf, cr].filter { $0 > 0 }.count > 1
+    }
+
+    /// The most common kind (ties go to CRLF, then LF), or nil when there are no line breaks.
+    var dominant: LineEnding? {
+        guard lf + crlf + cr > 0 else { return nil }
+        if crlf >= lf && crlf >= cr { return .crlf }
+        return lf >= cr ? .lf : .cr
+    }
+}
+
 @objc(TextDocument)
 final class TextDocument: NSDocument {
-    /// Plain text with LF line endings; the original line ending is restored on save.
+    /// Plain text with LF line endings. Saving writes back the file's own line ending, encoding and byte order mark,
+    /// so a file changes only where it was edited.
     let textStorage = NSTextStorage()
-    private var usesCRLF = defaults.integer(forKey: Pref.lineEnding) == 1
+    /// The encoding saving uses: the one the file was read with, UTF-8 for new documents. UTF-16 is always
+    /// written with a byte order mark, as it is only ever detected from one. A UTF-8 BOM is kept as U+FEFF in the text.
+    private(set) var encoding: String.Encoding = .utf8
+    private(set) var lineEnding: LineEnding = defaults.integer(forKey: Pref.lineEnding) == 1 ? .crlf : .lf
+    /// The file mixed line break kinds; saving makes them all `lineEnding`, so it asks first.
+    private(set) var hasMixedLineEndings = false
+    /// Content that is not text (it has NUL bytes) or that would not survive being decoded and encoded again.
+    /// It is shown read-only, and saving writes the original bytes.
+    private(set) var isBinary = false
+    private var originalData: Data?
+
+    /// Asks whether to go ahead with a save that changes more than the user's edits (`saveWarnings`).
+    /// Replaceable so tests are not blocked by an alert.
+    static var confirmLossySave: (TextDocument, [String], @escaping (Bool) -> Void) -> Void = { document, warnings, completion in
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Saving “\(document.displayName ?? "")” will change more than your edits."
+        alert.informativeText = warnings.joined(separator: "\n\n")
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        if let window = document.windowForSheet {
+            alert.beginSheetModal(for: window) { completion($0 == .alertFirstButtonReturn) }
+        } else {
+            completion(alert.runModal() == .alertFirstButtonReturn)
+        }
+    }
 
     override class var autosavesInPlace: Bool {
         return false
@@ -439,7 +510,7 @@ final class TextDocument: NSDocument {
     weak var host: EditorWindowController?
 
     var tabTitle: String {
-        return (isDocumentEdited ? "* " : "") + displayName
+        return (isDocumentEdited ? "* " : "") + displayName + (isBinary ? " (read-only)" : "")
     }
 
     override var fileURL: URL? {
@@ -477,14 +548,69 @@ final class TextDocument: NSDocument {
 
     /// With "save on focus lost", a document that has a file is saved when its tab or window loses focus.
     /// Skipped while a sheet (save, close or error prompt) is up, so it never races a prompt.
+    /// A save that would need confirmation (`saveWarnings`) is left for an explicit save: the user is elsewhere.
     func saveIfWanted() {
         guard defaults.bool(forKey: Pref.saveOnFocusLost), fileURL != nil, isDocumentEdited,
-              host?.window?.attachedSheet == nil else { return }
+              host?.window?.attachedSheet == nil, saveWarnings.isEmpty else { return }
         save(nil)
     }
 
     override func read(from url: URL, ofType typeName: String) throws {
         try read(from: TextDocument.readRegularFile(at: url), ofType: typeName)
+    }
+
+    /// Reloading a file that grew past the large file size asks first, as opening it does.
+    override func revert(toContentsOf url: URL, ofType typeName: String) throws {
+        guard documentController.confirmSize(of: url) else { throw CocoaError(.userCancelled) }
+        try super.revert(toContentsOf: url, ofType: typeName)
+    }
+
+    // MARK: - Saving
+
+    /// What saving would change beyond the user's edits. Empty when the file is written back faithfully.
+    var saveWarnings: [String] {
+        guard !isBinary else { return [] }
+        var warnings: [String] = []
+        if hasMixedLineEndings {
+            warnings.append("It has mixed line endings. All of them will be saved as \(lineEnding.name).")
+        }
+        if !canEncodeText {
+            warnings.append("It contains characters that \(String.localizedName(of: encoding)) cannot represent, so it will be saved as UTF-8.")
+        }
+        return warnings
+    }
+
+    private var canEncodeText: Bool {
+        switch encoding {
+        case .utf8, .utf16LittleEndian, .utf16BigEndian:
+            return true
+        default:
+            return textStorage.mutableString.canBeConverted(to: encoding.rawValue)
+        }
+    }
+
+    /// Every save (Save, Save As, closing with Save, save on focus lost) comes through here. One that would
+    /// change more than the edits is confirmed first; declining cancels it and leaves the file as it is.
+    override func save(to url: URL, ofType typeName: String, for saveOperation: NSDocument.SaveOperationType, completionHandler: @escaping (Error?) -> Void) {
+        // NSTextView merges consecutive typing into one undo step. Without a break here, typing after the save
+        // would extend the step that was saved: the document would not be marked edited (no "*"), and one undo
+        // would also take back text that is already on disk.
+        host?.pane(for: self)?.textView.breakUndoCoalescing()
+        let isAutosave = [.autosaveElsewhereOperation, .autosaveInPlaceOperation, .autosaveAsOperation].contains(saveOperation)
+        let warnings = isAutosave ? [] : saveWarnings
+        guard !warnings.isEmpty else {
+            super.save(to: url, ofType: typeName, for: saveOperation, completionHandler: completionHandler)
+            return
+        }
+        TextDocument.confirmLossySave(self, warnings) { confirmed in
+            guard confirmed else {
+                completionHandler(CocoaError(.userCancelled))
+                return
+            }
+            self.hasMixedLineEndings = false
+            if !self.canEncodeText { self.encoding = .utf8 }
+            super.save(to: url, ofType: typeName, for: saveOperation, completionHandler: completionHandler)
+        }
     }
 
     /// Reads a regular file. Directories, FIFOs and devices are rejected: they would fail, or block forever, when read.
@@ -509,21 +635,59 @@ final class TextDocument: NSDocument {
     }
 
     override func read(from data: Data, ofType typeName: String) throws {
-        let raw = TextDocument.decode(data) as NSString
-        if raw.range(of: "\r\n").location != NSNotFound {
-            usesCRLF = true
-        } else if raw.rangeOfCharacter(from: .newlines).location != NSNotFound {
-            usesCRLF = false
+        let decoded: (text: String, encoding: String.Encoding)
+        let counts: LineEndingCounts
+        var roundTrips = true
+        if let utf16 = TextDocument.decodeUTF16(data) {
+            decoded = (TextDocument.normalizeLineEndings(utf16.text as NSString), utf16.encoding)
+            counts = TextDocument.lineEndingCounts(utf16.text as NSString)
+        } else {
+            // Every other supported encoding is ASCII-compatible, so line breaks are normalized on the bytes,
+            // in one pass and without an extra copy of the text.
+            let normalized = TextDocument.normalizeLineEndings(bytes: data)
+            decoded = TextDocument.decodeDetectingEncoding(normalized.data, allowUTF16: false)
+            counts = normalized.counts
+            if decoded.encoding != .utf8 {   // valid UTF-8 always round-trips; check the legacy encodings
+                roundTrips = decoded.text.data(using: decoded.encoding) == normalized.data
+            }
         }
+        let isUTF16 = decoded.encoding == .utf16LittleEndian || decoded.encoding == .utf16BigEndian
+        let binary = !roundTrips || (!isUTF16 && data.withUnsafeBytes { $0.count > 0 && memchr($0.baseAddress, 0, $0.count) != nil })
+
+        encoding = decoded.encoding
+        isBinary = binary
+        originalData = binary ? data : nil
+        hasMixedLineEndings = counts.isMixed
+        if let dominant = counts.dominant { lineEnding = dominant }   // without line breaks, keep the current one
+
         // Keep the editor's font and color when reloading a file that changed on disk.
         let attributes = textStorage.length > 0 ? textStorage.attributes(at: 0, effectiveRange: nil) : [:]
-        textStorage.replaceCharacters(in: NSRange(location: 0, length: textStorage.length), with: NSAttributedString(string: TextDocument.normalizeLineEndings(raw), attributes: attributes))
+        textStorage.replaceCharacters(in: NSRange(location: 0, length: textStorage.length), with: NSAttributedString(string: decoded.text, attributes: attributes))
         undoManager?.removeAllActions()
+        host?.pane(for: self)?.syncEditability()
+        host?.refreshTitles()
     }
 
     override func data(ofType typeName: String) throws -> Data {
-        let text = TextDocument.normalizeLineEndings(textStorage.mutableString)
-        return Data((usesCRLF ? text.replacingOccurrences(of: "\n", with: "\r\n") : text).utf8)
+        if isBinary, let original = originalData { return original }   // read-only, so never edited
+        var text = TextDocument.normalizeLineEndings(textStorage.mutableString)
+        if lineEnding != .lf { text = text.replacingOccurrences(of: "\n", with: lineEnding.string) }
+        return try TextDocument.encode(text, as: encoding)
+    }
+
+    /// Encodes text for saving. Never lossy: a character the encoding cannot hold makes it throw instead.
+    static func encode(_ text: String, as encoding: String.Encoding) throws -> Data {
+        let bom: [UInt8]
+        switch encoding {
+        case .utf8: return Data(text.utf8)
+        case .utf16LittleEndian: bom = [0xFF, 0xFE]
+        case .utf16BigEndian: bom = [0xFE, 0xFF]
+        default: bom = []
+        }
+        guard let body = text.data(using: encoding) else {
+            throw CocoaError(.fileWriteInapplicableStringEncoding, userInfo: [NSStringEncodingErrorKey: encoding.rawValue])
+        }
+        return Data(bom) + body
     }
 
     static func normalizeLineEndings(_ text: NSString) -> String {
@@ -531,21 +695,94 @@ final class TextDocument: NSDocument {
         return text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
     }
 
+    /// Converts CRLF and CR to LF in one pass over bytes in an ASCII-compatible encoding (UTF-8, Windows-1252,
+    /// Mac Roman: a CR or LF byte is never part of another character there), counting each kind of break.
+    /// Without any CR, the data is returned as is, and only whether it has LFs is counted.
+    static func normalizeLineEndings(bytes data: Data) -> (data: Data, counts: LineEndingCounts) {
+        var counts = LineEndingCounts()
+        let hasCR = data.withUnsafeBytes { $0.count > 0 && memchr($0.baseAddress, 0x0D, $0.count) != nil }
+        guard hasCR else {
+            counts.lf = data.withUnsafeBytes { $0.count > 0 && memchr($0.baseAddress, 0x0A, $0.count) != nil } ? 1 : 0
+            return (data, counts)
+        }
+        var output = Data(count: data.count)
+        let written = output.withUnsafeMutableBytes { (out: UnsafeMutableRawBufferPointer) -> Int in
+            data.withUnsafeBytes { (input: UnsafeRawBufferPointer) -> Int in
+                let source = input.bindMemory(to: UInt8.self)
+                let target = out.bindMemory(to: UInt8.self)
+                var read = 0, write = 0
+                while read < source.count {
+                    let byte = source[read]
+                    read += 1
+                    if byte == 0x0D {
+                        if read < source.count && source[read] == 0x0A {
+                            counts.crlf += 1
+                            read += 1
+                        } else {
+                            counts.cr += 1
+                        }
+                        target[write] = 0x0A
+                    } else {
+                        if byte == 0x0A { counts.lf += 1 }
+                        target[write] = byte
+                    }
+                    write += 1
+                }
+                return write
+            }
+        }
+        output.count = written
+        return (output, counts)
+    }
+
+    /// Counts line breaks in text (for UTF-16 files, whose bytes cannot be scanned for CR and LF directly).
+    static func lineEndingCounts(_ text: NSString) -> LineEndingCounts {
+        var counts = LineEndingCounts()
+        var buffer = [unichar](repeating: 0, count: min(text.length, 65_536))
+        var offset = 0
+        var pendingCR = false
+        while offset < text.length {
+            let count = min(buffer.count, text.length - offset)
+            text.getCharacters(&buffer, range: NSRange(location: offset, length: count))
+            for index in 0..<count {
+                let unit = buffer[index]
+                if pendingCR {
+                    pendingCR = false
+                    if unit == 10 { counts.crlf += 1; continue }
+                    counts.cr += 1
+                }
+                if unit == 13 { pendingCR = true } else if unit == 10 { counts.lf += 1 }
+            }
+            offset += count
+        }
+        if pendingCR { counts.cr += 1 }
+        return counts
+    }
+
     static func decode(_ data: Data) -> String {
-        if let text = String(data: data, encoding: .utf8) { return text }
-        // UTF-16 only when it decodes losslessly: an odd byte count or broken surrogates would otherwise be
-        // silently dropped or replaced, and saving would then destroy the file's contents.
+        return decodeDetectingEncoding(data).text
+    }
+
+    /// UTF-8; then UTF-16 with a byte order mark; then Windows-1252; then Mac Roman, which maps every byte.
+    static func decodeDetectingEncoding(_ data: Data, allowUTF16: Bool = true) -> (text: String, encoding: String.Encoding) {
+        if let text = String(data: data, encoding: .utf8) { return (text, .utf8) }
+        if allowUTF16, let utf16 = decodeUTF16(data) { return utf16 }
+        if let text = String(data: data, encoding: .windowsCP1252) { return (text, .windowsCP1252) }
+        if let text = String(data: data, encoding: .macOSRoman) { return (text, .macOSRoman) }
+        return (String(decoding: data, as: UTF8.self), .utf8)
+    }
+
+    /// UTF-16 with a byte order mark, only when it decodes losslessly: an odd byte count or broken surrogates
+    /// would otherwise be silently dropped or replaced, and saving would then destroy the file's contents.
+    static func decodeUTF16(_ data: Data) -> (text: String, encoding: String.Encoding)? {
         for (bom, encoding) in [([UInt8](arrayLiteral: 0xFF, 0xFE), String.Encoding.utf16LittleEndian), ([0xFE, 0xFF], .utf16BigEndian)]
         where data.starts(with: bom) {
             let payload = data.dropFirst(2)
             if payload.count % 2 == 0, let text = String(data: payload, encoding: encoding), text.data(using: encoding) == payload {
-                return text
+                return (text, encoding)
             }
         }
-        // macOSRoman maps every byte, so it is the final fallback.
-        return String(data: data, encoding: .windowsCP1252)
-            ?? String(data: data, encoding: .macOSRoman)
-            ?? String(decoding: data, as: UTF8.self)
+        return nil
     }
 
     override func prepareSavePanel(_ savePanel: NSSavePanel) -> Bool {
@@ -845,8 +1082,30 @@ final class EditorPane: NSView {
 
     private var fontSize = NSFont.systemFontSize
     private var wrapsLines = defaults.bool(forKey: Pref.wordWrap)
+    /// Documents up to this length (UTF-16 units) are searched at once; longer ones in slices between events.
+    static var synchronousScanLimit = 1_000_000
+    /// Characters searched per step of a sliced scan.
+    static var scanWindowLength = 262_144
+    /// Highlights stop here; Find Next, Find Previous and Replace still reach every match.
+    static var maxMatches = 100_000
+
+    /// A search in progress over a large document, advanced a few milliseconds at a time.
+    private struct Scan {
+        let query: String
+        let options: NSString.CompareOptions
+        let generation: Int
+        var position = 0
+        var found: [NSRange] = []
+    }
+
     private var matches: [NSRange] = []
+    /// False when the match list stopped at `maxMatches`.
+    private var matchesAreComplete = true
     private var matchesAreStale = false
+    private var scan: Scan?
+    private var scanGeneration = 0
+    /// After the query changes, the first match after the caret is selected once the scan finishes.
+    private var selectsMatchWhenScanned = false
 
     init(document: TextDocument) {
         self.document = document
@@ -864,6 +1123,7 @@ final class EditorPane: NSView {
         setupViews()
         applyWordWrap()
         applySettings()
+        syncEditability()
         NotificationCenter.default.addObserver(self, selector: #selector(applySettings), name: UserDefaults.didChangeNotification, object: nil)
         // Any change to the text (typing, undo, Revert to Saved, reloading a file changed on disk) makes the
         // search matches stale; edits that bypass the text view would otherwise leave Replace acting on old ranges.
@@ -930,6 +1190,11 @@ final class EditorPane: NSView {
         window?.makeFirstResponder(textView)
     }
 
+    /// Binary content is shown read-only (see `TextDocument.isBinary`).
+    func syncEditability() {
+        textView.isEditable = !document.isBinary
+    }
+
     /// The pane is going away; detach its layout manager from the document's storage.
     func detach() {
         if let layoutManager = textView.layoutManager {
@@ -986,55 +1251,130 @@ final class EditorPane: NSView {
     }
 
     /// Recomputes every match of the current query; the text view draws the highlights.
+    /// A large document is scanned in slices of a few milliseconds, so typing (in the document or in the find
+    /// field) never waits for a whole-document scan; any edit or new query abandons the scan and starts over.
     @objc private func refreshMatches() {
         NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(refreshMatches), object: nil)
         matchesAreStale = false
-        matches = []
+        scanGeneration += 1
+        scan = nil
 
         let query = searchBar.query
-        if !searchBar.isHidden && !query.isEmpty, let text = textView.textStorage?.string as NSString? {
-            var searchRange = NSRange(location: 0, length: text.length)
-            while true {
-                let range = text.range(of: query, options: searchOptions, range: searchRange)
-                if range.location == NSNotFound || range.length == 0 { break }
-                matches.append(range)
-                searchRange = NSRange(location: NSMaxRange(range), length: text.length - NSMaxRange(range))
-            }
+        guard !searchBar.isHidden, !query.isEmpty else {
+            finishScan(found: [], complete: true)
+            return
         }
-        textView.findHighlights = matches
+        var newScan = Scan(query: query, options: searchOptions, generation: scanGeneration)
+        let text = document.textStorage.mutableString
+        if text.length <= EditorPane.synchronousScanLimit {
+            EditorPane.advance(&newScan, in: text, until: nil)
+            finishScan(found: newScan.found, complete: newScan.found.count < EditorPane.maxMatches)
+        } else {
+            scan = newScan
+            searchBar.status = "Searching…"
+            scheduleScanSlice(generation: newScan.generation)
+        }
+    }
+
+    private func scheduleScanSlice(generation: Int) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.scan?.generation == generation else { return }   // abandoned or replaced
+            self.continueScan()
+        }
+    }
+
+    private func continueScan() {
+        guard var current = scan else { return }
+        scan = nil   // the only reference to `found` while scanning, so appending never copies it
+        let done = EditorPane.advance(&current, in: document.textStorage.mutableString, until: CACurrentMediaTime() + 0.008)
+        if done {
+            finishScan(found: current.found, complete: current.found.count < EditorPane.maxMatches)
+        } else {
+            scan = current
+            scheduleScanSlice(generation: current.generation)
+        }
+    }
+
+    /// Finds matches from `scan.position`, one window at a time, until the end of the text, the match cap or the
+    /// deadline. Returns whether the scan is done. Matches are the same as one search over the whole text: each
+    /// window's search reaches a little past the window, so a match that starts inside it is always found whole
+    /// (a case-insensitive match can be longer than the query, as "ﬃ" for "ffi", but not 4 times as long).
+    @discardableResult
+    private static func advance(_ scan: inout Scan, in text: NSString, until deadline: CFTimeInterval?) -> Bool {
+        let length = text.length
+        let reach = 4 * (scan.query as NSString).length + 16
+        while scan.position < length && scan.found.count < maxMatches {
+            let windowEnd = min(length, scan.position + max(1, scanWindowLength))
+            let searchEnd = min(length, windowEnd + reach)
+            var start = scan.position
+            while start < searchEnd && scan.found.count < maxMatches {
+                let range = text.range(of: scan.query, options: scan.options, range: NSRange(location: start, length: searchEnd - start))
+                if range.location == NSNotFound || range.length == 0 || range.location >= windowEnd { break }
+                scan.found.append(range)
+                start = NSMaxRange(range)
+            }
+            scan.position = scan.found.count < maxMatches ? max(windowEnd, start) : start
+            if let deadline = deadline, CACurrentMediaTime() >= deadline { break }
+        }
+        return scan.position >= length || scan.found.count >= maxMatches
+    }
+
+    private func finishScan(found: [NSRange], complete: Bool) {
+        matches = found
+        matchesAreComplete = complete
+        textView.findHighlights = found
         updateMatchStatus()
+        if selectsMatchWhenScanned {
+            selectsMatchWhenScanned = false
+            selectFirstMatchAfterCaret()
+        }
     }
 
     /// Edits only schedule a rescan, so typing in a large document stays fast while the search bar is open.
+    /// A scan in progress is abandoned: its positions no longer fit the text.
     private func scheduleMatchRefresh() {
         matchesAreStale = true
+        scan = nil
         NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(refreshMatches), object: nil)
         perform(#selector(refreshMatches), with: nil, afterDelay: 0.15)
     }
 
-    private func refreshMatchesIfStale() {
-        if matchesAreStale { refreshMatches() }
+    /// The match list, when it is current and complete enough to navigate by; otherwise nil (search directly).
+    private var navigableMatches: [NSRange]? {
+        if matchesAreStale && document.textStorage.length <= EditorPane.synchronousScanLimit { refreshMatches() }
+        return !matchesAreStale && scan == nil && matchesAreComplete ? matches : nil
     }
 
     private func updateMatchStatus() {
         let selection = textView.selectedRange()
         let index = matches.firstIndex(endingAfter: selection.location)
+        let more = matchesAreComplete ? "" : "+"
         if searchBar.query.isEmpty {
             searchBar.status = ""
+        } else if scan != nil {
+            searchBar.status = "Searching…"
         } else if matches.isEmpty {
             searchBar.status = "No matches"
         } else if index < matches.count && matches[index] == selection {
-            searchBar.status = "\(index + 1) of \(matches.count)"
+            searchBar.status = "\(index + 1) of \(matches.count)\(more)"
         } else {
-            searchBar.status = matches.count == 1 ? "1 match" : "\(matches.count) matches"
+            searchBar.status = matches.count == 1 && matchesAreComplete ? "1 match" : "\(matches.count)\(more) matches"
         }
     }
 
     private func searchQueryChanged() {
+        selectsMatchWhenScanned = true
         refreshMatches()
-        guard !matches.isEmpty else { return }
-        let index = matches.firstIndex(endingAfter: textView.selectedRange().location)
-        select(index < matches.count ? matches[index] : matches[0])
+    }
+
+    private func selectFirstMatchAfterCaret() {
+        let caret = textView.selectedRange().location
+        let index = matches.firstIndex(endingAfter: caret)
+        if index < matches.count {
+            select(matches[index])
+        } else if let match = matchesAreComplete ? matches.first : directMatch(forward: true, from: NSRange(location: caret, length: 0)) {
+            select(match)
+        }
     }
 
     private func selectMatch(forward: Bool) {
@@ -1042,21 +1382,46 @@ final class EditorPane: NSView {
             showFind(nil)
             return
         }
-        refreshMatchesIfStale()
-        guard !matches.isEmpty else {
+        let selection = textView.selectedRange()
+        let match: NSRange?
+        if let matches = navigableMatches {
+            if matches.isEmpty {
+                match = nil
+            } else if forward {
+                let index = matches.firstIndex(endingAfter: NSMaxRange(selection))
+                match = index < matches.count ? matches[index] : matches[0]
+            } else {
+                let index = matches.firstIndex(endingAfter: selection.location) - 1
+                match = index >= 0 ? matches[index] : matches[matches.count - 1]
+            }
+        } else {
+            match = directMatch(forward: forward, from: selection)
+        }
+        guard let found = match else {
             NSSound.beep()
             return
         }
-        let selection = textView.selectedRange()
-        let match: NSRange
-        if forward {
-            let index = matches.firstIndex(endingAfter: NSMaxRange(selection))
-            match = index < matches.count ? matches[index] : matches[0]
-        } else {
-            let index = matches.firstIndex(endingAfter: selection.location) - 1
-            match = index >= 0 ? matches[index] : matches[matches.count - 1]
+        select(found)
+    }
+
+    /// The next (or previous) match searched for directly in the text, wrapping around; for when the match list
+    /// is still being built or stopped at the cap.
+    private func directMatch(forward: Bool, from selection: NSRange) -> NSRange? {
+        let text = document.textStorage.mutableString
+        let query = searchBar.query
+        let length = text.length
+        func find(in range: NSRange, _ extra: NSString.CompareOptions) -> NSRange? {
+            let found = text.range(of: query, options: searchOptions.union(extra), range: range)
+            return found.location == NSNotFound || found.length == 0 ? nil : found
         }
-        select(match)
+        if forward {
+            let start = min(NSMaxRange(selection), length)
+            return find(in: NSRange(location: start, length: length - start), [])
+                ?? find(in: NSRange(location: 0, length: length), [])
+        }
+        let end = min(selection.location, length)
+        return find(in: NSRange(location: 0, length: end), .backwards)
+            ?? find(in: NSRange(location: 0, length: length), .backwards)
     }
 
     private func select(_ range: NSRange) {
@@ -1066,13 +1431,13 @@ final class EditorPane: NSView {
         updateMatchStatus()
     }
 
+    /// Replaces the selection only if it is a match of the query in the current text (checked directly, so it also
+    /// holds past the highlight cap, during a scan, and after the text changed underneath).
     private func replaceCurrentMatch() {
-        refreshMatchesIfStale()
         let selection = textView.selectedRange()
         let replacement = searchBar.replacement
-        let index = matches.firstIndex(endingAfter: selection.location)
         let text = document.textStorage.mutableString
-        if index < matches.count, matches[index] == selection, NSMaxRange(selection) <= text.length,
+        if selection.length > 0, NSMaxRange(selection) <= text.length,
            text.compare(searchBar.query, options: searchOptions, range: selection) == .orderedSame,
            textView.shouldChangeText(in: selection, replacementString: replacement) {
             textView.replaceCharacters(in: selection, with: replacement)

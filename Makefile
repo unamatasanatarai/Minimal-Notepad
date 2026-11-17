@@ -21,7 +21,8 @@ build:
 	@./scripts/build.sh
 
 ## run: Kill running app, rebuild, and launch application
-run: kill build
+run: kill
+	@LOCAL_DEV_SIGNING=1 ./scripts/build.sh
 	@echo "==> Launching $(APP_NAME).app..."
 	@open "$(APP_BUNDLE)"
 

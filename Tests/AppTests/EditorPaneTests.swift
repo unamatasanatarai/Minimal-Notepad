@@ -341,6 +341,73 @@ public enum EditorPaneTests {
             try expectEqual(doc.textStorage.string, "Apple banana pear cherry APPLE")
         }
 
+        testRunner("EditorPane scans large documents in slices, with the same matches as a full scan") {
+            // Every search below runs in the sliced mode, with windows small enough that matches straddle them.
+            EditorPane.synchronousScanLimit = 0
+            EditorPane.scanWindowLength = 7
+            let text = String(repeating: "apple banana Apple cherry appLE ", count: 40) + "ﬃ ffi"
+            let (pane, _) = makePane(text)
+
+            func expected(_ query: String, _ options: NSString.CompareOptions) -> [NSRange] {
+                let string = text as NSString
+                var result: [NSRange] = []
+                var range = NSRange(location: 0, length: string.length)
+                while case let match = string.range(of: query, options: options, range: range), match.location != NSNotFound, match.length > 0 {
+                    result.append(match)
+                    range = NSRange(location: NSMaxRange(match), length: string.length - NSMaxRange(match))
+                }
+                return result
+            }
+
+            for (query, matchCase) in [("apple", false), ("apple", true), ("a", false), ("ffi", false), ("ﬃ", false), ("zzz", false), ("e c", false)] {
+                let controls = try search(pane, query, matchCase: matchCase)
+                try expect(TestSupport.spin { !controls.bar.status.hasPrefix("Searching") }, "\(query): the scan finishes")
+                let options: NSString.CompareOptions = matchCase ? [.literal] : [.literal, .caseInsensitive]
+                try expectEqual(pane.textView.findHighlights, expected(query, options), "\(query) matchCase=\(matchCase)")
+            }
+
+            // The first match after the caret is selected once the scan finishes.
+            pane.textView.setSelectedRange(NSRange(location: 40, length: 0))
+            let controls = try search(pane, "cherry")
+            try expectEqual(controls.bar.status, "Searching…", "a large document is not scanned in one go")
+            try expect(TestSupport.spin { controls.bar.status == "2 of 40" }, controls.bar.status)
+            try expectEqual(pane.textView.selectedRange(), expected("cherry", [.literal, .caseInsensitive])[1])
+        }
+
+        testRunner("EditorPane an edit during a sliced scan restarts it on the new text") {
+            EditorPane.synchronousScanLimit = 0
+            EditorPane.scanWindowLength = 3
+            let (pane, doc) = makePane(String(repeating: "x o ", count: 200))
+            let controls = try search(pane, "o")
+            try expectEqual(controls.bar.status, "Searching…")
+            doc.textStorage.mutableString.setString("o o o")
+            try expect(TestSupport.spin { pane.textView.findHighlights.count == 3 }, "\(pane.textView.findHighlights.count)")
+            try expectEqual(pane.textView.findHighlights, [NSRange(location: 0, length: 1), NSRange(location: 2, length: 1), NSRange(location: 4, length: 1)])
+        }
+
+        testRunner("EditorPane caps the match count but still finds and replaces past the cap") {
+            EditorPane.maxMatches = 3
+            let (pane, doc) = try makeHostedPane("a a a a a")
+            let controls = try search(pane, "a", replace: "b")
+            try expectEqual(pane.textView.findHighlights.count, 3)
+            try expectEqual(controls.bar.status, "1 of 3+")
+            pane.textView.setSelectedRange(NSRange(location: 1, length: 0))
+            try expectEqual(controls.bar.status, "3+ matches")
+
+            pane.textView.setSelectedRange(NSRange(location: 4, length: 1))
+            pane.findNext(nil)
+            try expectEqual(pane.textView.selectedRange(), NSRange(location: 6, length: 1), "beyond the highlighted matches")
+            pane.findNext(nil)
+            try expectEqual(pane.textView.selectedRange(), NSRange(location: 8, length: 1))
+            pane.findNext(nil)
+            try expectEqual(pane.textView.selectedRange(), NSRange(location: 0, length: 1), "wraps")
+            pane.findPrevious(nil)
+            try expectEqual(pane.textView.selectedRange(), NSRange(location: 8, length: 1), "wraps backwards")
+
+            controls.bar.onReplace?()
+            try expectEqual(doc.textStorage.string, "a a a a b")
+        }
+
         testRunner("EditorPane moveCaret goes to the start of a 1-based line, clamped to the text") {
             let (pane, doc) = makePane("Line 1\nLine 2\nLine 3\n")
             pane.moveCaret(toLine: 1)

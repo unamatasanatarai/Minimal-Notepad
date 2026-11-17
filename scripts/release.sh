@@ -293,6 +293,7 @@ jq -n --rawfile prompt "$prompt_file" '{
 
 info "Generating release summary via Gemini (${GEMINI_MODEL})..."
 
+# The API key goes to curl on stdin (-H @-), never as an argument: arguments are visible to every local user via ps.
 if ! curl \
     --silent \
     --show-error \
@@ -300,10 +301,10 @@ if ! curl \
     --connect-timeout 15 \
     --max-time 180 \
     -X POST "$GEMINI_API_URL" \
-    -H "x-goog-api-key: ${GEMINI_API_KEY}" \
+    -H @- \
     -H 'Content-Type: application/json' \
     --data-binary "@${request_file}" \
-    -o "$response_file"; then
+    -o "$response_file" <<<"x-goog-api-key: ${GEMINI_API_KEY}"; then
 
     printf 'Gemini API request failed.\n' >&2
     jq -r '.error.message // empty' "$response_file" >&2 2>/dev/null || true

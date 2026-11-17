@@ -60,14 +60,24 @@ public enum TextDocumentTests {
             try doc.read(from: Data("First\nSecond".utf8), ofType: "public.plain-text")
             try expectEqual(String(data: try doc.data(ofType: "public.plain-text"), encoding: .utf8), "First\nSecond")
 
-            // Mixed CRLF and LF: any CRLF makes the file CRLF, and every line gets CRLF on save.
+            // Mixed line endings: the most common one wins (ties go to CRLF, then LF), and every line gets it on save.
             try doc.read(from: Data("a\nb\r\nc".utf8), ofType: "public.plain-text")
+            try expect(doc.hasMixedLineEndings)
             try expectEqual(String(data: try doc.data(ofType: "public.plain-text"), encoding: .utf8), "a\r\nb\r\nc")
+            try doc.read(from: Data("a\nb\nc\r\nd".utf8), ofType: "public.plain-text")
+            try expectEqual(String(data: try doc.data(ofType: "public.plain-text"), encoding: .utf8), "a\nb\nc\nd")
+            try doc.read(from: Data("a\rb\rc\nd".utf8), ofType: "public.plain-text")
+            try expectEqual(String(data: try doc.data(ofType: "public.plain-text"), encoding: .utf8), "a\rb\rc\rd")
 
-            // Classic Mac (CR-only) files are read correctly, but saved with LF.
+            // Classic Mac (CR-only) files are read with LF and saved with CR again.
             try doc.read(from: Data("a\rb".utf8), ofType: "public.plain-text")
+            try expect(!doc.hasMixedLineEndings)
             try expectEqual(doc.textStorage.string, "a\nb")
-            try expectEqual(String(data: try doc.data(ofType: "public.plain-text"), encoding: .utf8), "a\nb")
+            try expectEqual(String(data: try doc.data(ofType: "public.plain-text"), encoding: .utf8), "a\rb")
+
+            // A CRLF split across the byte-scanning buffer and a CR right before a CRLF are handled.
+            try doc.read(from: Data("a\r\r\nb".utf8), ofType: "public.plain-text")
+            try expectEqual(doc.textStorage.string, "a\n\nb")
 
             // New documents follow the line ending preference.
             defaults.set(1, forKey: Pref.lineEnding)
@@ -80,13 +90,168 @@ public enum TextDocumentTests {
             try expectEqual(String(data: try lfDoc.data(ofType: "public.plain-text"), encoding: .utf8), "x\ny")
         }
 
-        testRunner("TextDocument data(ofType:) normalizes stray CRs and always writes UTF-8") {
+        testRunner("TextDocument data(ofType:) normalizes stray CRs; new documents are UTF-8") {
             let doc = TextDocument()
             doc.textStorage.mutableString.setString("a\rb\r\nc ż")
             try expectEqual(try doc.data(ofType: "public.plain-text"), Data("a\nb\nc ż".utf8))
-            // A document read from Windows-1252 is saved as UTF-8 (the original encoding is not kept).
-            try doc.read(from: Data([0x80]), ofType: "public.plain-text")
-            try expectEqual(try doc.data(ofType: "public.plain-text"), Data("€".utf8))
+            try expectEqual(doc.encoding, .utf8)
+        }
+
+        testRunner("TextDocument writes back exactly what it read: encoding, BOM and line endings") {
+            var utf16LE = Data([0xFF, 0xFE]); utf16LE.append("ż\r\nb".data(using: .utf16LittleEndian)!)
+            var utf16BE = Data([0xFE, 0xFF]); utf16BE.append("ż\nb".data(using: .utf16BigEndian)!)
+            let samples: [(String, Data, String.Encoding)] = [
+                ("UTF-8", Data("héllo\nwörld\n".utf8), .utf8),
+                ("UTF-8 with BOM", Data([0xEF, 0xBB, 0xBF]) + Data("hi\r\n".utf8), .utf8),
+                ("UTF-16 LE", utf16LE, .utf16LittleEndian),
+                ("UTF-16 BE", utf16BE, .utf16BigEndian),
+                ("Windows-1252", Data([0x63, 0x61, 0x66, 0xE9, 0x0D, 0x0A, 0x80]), .windowsCP1252),
+                ("Mac Roman", Data([0x81, 0x61, 0x0D, 0x62]), .macOSRoman),
+                ("CR only", Data("a\rb\r".utf8), .utf8),
+                ("no line break", Data("x".utf8), .utf8),
+                ("empty", Data(), .utf8)
+            ]
+            for (name, bytes, encoding) in samples {
+                let doc = TextDocument()
+                try doc.read(from: bytes, ofType: "public.plain-text")
+                try expectEqual(doc.encoding, encoding, name)
+                try expect(doc.saveWarnings.isEmpty, "\(name): \(doc.saveWarnings)")
+                try expectEqual(try doc.data(ofType: "public.plain-text"), bytes, name)
+            }
+        }
+
+        testRunner("TextDocument edits are saved in the file's own encoding") {
+            let latin = TextDocument()
+            try latin.read(from: Data([0x63, 0x61, 0x66, 0xE9]), ofType: "public.plain-text")   // "café" in Windows-1252
+            latin.textStorage.mutableString.append(" €")
+            try expectEqual(try latin.data(ofType: "public.plain-text"), Data([0x63, 0x61, 0x66, 0xE9, 0x20, 0x80]))
+
+            let wide = TextDocument()
+            var bytes = Data([0xFF, 0xFE]); bytes.append("a".data(using: .utf16LittleEndian)!)
+            try wide.read(from: bytes, ofType: "public.plain-text")
+            wide.textStorage.mutableString.append("\nż")
+            var expected = Data([0xFF, 0xFE]); expected.append("a\nż".data(using: .utf16LittleEndian)!)
+            try expectEqual(try wide.data(ofType: "public.plain-text"), expected)
+
+            // A character the encoding cannot hold is never dropped or replaced: writing fails instead.
+            latin.textStorage.mutableString.append(" ż")
+            try expect(!latin.saveWarnings.isEmpty)
+            let error = try expectThrows { _ = try latin.data(ofType: "public.plain-text") }
+            try expectEqual((error as? CocoaError)?.code, .fileWriteInapplicableStringEncoding)
+        }
+
+        testRunner("TextDocument opens files with NUL bytes read-only and saves their bytes unchanged") {
+            let bytes = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x81, 0xFF, 0x0D])
+            let doc = TextDocument()
+            try doc.read(from: bytes, ofType: "public.data")
+            try expect(doc.isBinary)
+            try expect(doc.saveWarnings.isEmpty)
+            try expectEqual(try doc.data(ofType: "public.data"), bytes)
+            try expect(doc.tabTitle.hasSuffix(" (read-only)"), doc.tabTitle)
+
+            let pane = EditorPane(document: doc)
+            try expect(!pane.textView.isEditable, "binary content cannot be edited")
+
+            // Reloading as text makes the same pane editable again.
+            let controller = EditorWindowController()
+            controller.add(doc)
+            let hosted = try unwrap(controller.selectedPane)
+            try expect(!hosted.textView.isEditable)
+            try doc.read(from: Data("text".utf8), ofType: "public.plain-text")
+            try expect(!doc.isBinary)
+            try expect(hosted.textView.isEditable)
+            try expect(!doc.tabTitle.contains("read-only"))
+
+            // UTF-16 text contains NUL bytes but is not binary.
+            var utf16 = Data([0xFF, 0xFE]); utf16.append("ok".data(using: .utf16LittleEndian)!)
+            try doc.read(from: utf16, ofType: "public.plain-text")
+            try expect(!doc.isBinary)
+        }
+
+        testRunner("TextDocument asks before a save would change more than the user's edits") {
+            let dir = try TestSupport.temporaryDirectory()
+            let latinURL = try TestSupport.writeFile(Data([0x63, 0x61, 0x66, 0xE9]), named: "latin.txt", in: dir)
+            let type = try documentController.typeForContents(of: latinURL)
+            let latin = try unwrap(try documentController.makeDocument(withContentsOf: latinURL, ofType: type) as? TextDocument)
+
+            func save(_ doc: TextDocument) throws -> Error? {
+                var result: Error??
+                doc.save(to: try unwrap(doc.fileURL), ofType: type, for: .saveOperation) { result = .some($0) }
+                try expect(TestSupport.spin { result != nil }, "save did not complete")
+                return result!
+            }
+
+            // Representable edits: saved silently, in Windows-1252.
+            latin.textStorage.mutableString.append("!")
+            try expect(try save(latin) == nil)
+            try expect(TestSupport.lossySavePrompts.isEmpty)
+            try expectEqual(try Data(contentsOf: latinURL), Data([0x63, 0x61, 0x66, 0xE9, 0x21]))
+
+            // A character Windows-1252 cannot hold: declining leaves the file alone.
+            latin.textStorage.mutableString.append("ż")
+            TestSupport.lossySaveAnswer = false
+            let declined = try save(latin)
+            try expectEqual((declined as? CocoaError)?.code, .userCancelled)
+            try expectEqual(TestSupport.lossySavePrompts.count, 1)
+            try expect(TestSupport.lossySavePrompts[0].contains { $0.contains("UTF-8") }, "\(TestSupport.lossySavePrompts)")
+            try expectEqual(try Data(contentsOf: latinURL), Data([0x63, 0x61, 0x66, 0xE9, 0x21]))
+            try expectEqual(latin.encoding, .windowsCP1252)
+
+            // Accepting converts to UTF-8, once.
+            TestSupport.lossySaveAnswer = true
+            try expect(try save(latin) == nil)
+            try expectEqual(try String(contentsOf: latinURL, encoding: .utf8), "café!ż")
+            try expectEqual(latin.encoding, .utf8)
+            try expect(try save(latin) == nil)
+            try expectEqual(TestSupport.lossySavePrompts.count, 2, "no prompt once converted")
+
+            // Mixed line endings: one prompt, then the file is uniform.
+            let mixedURL = try TestSupport.writeFile("a\r\nb\nc\r\n", named: "mixed.txt", in: dir)
+            let mixed = try unwrap(try documentController.makeDocument(withContentsOf: mixedURL, ofType: type) as? TextDocument)
+            try expect(try save(mixed) == nil)
+            try expectEqual(TestSupport.lossySavePrompts.count, 3)
+            try expect(TestSupport.lossySavePrompts[2].contains { $0.contains("mixed line endings") }, "\(TestSupport.lossySavePrompts)")
+            try expectEqual(try String(contentsOf: mixedURL, encoding: .utf8), "a\r\nb\r\nc\r\n")
+            try expect(!mixed.hasMixedLineEndings)
+
+            // The Save menu command goes through the same check.
+            let menuURL = try TestSupport.writeFile("x\ny\r\n", named: "menu.txt", in: dir)
+            let viaMenu = try unwrap(try documentController.makeDocument(withContentsOf: menuURL, ofType: type) as? TextDocument)
+            TestSupport.lossySaveAnswer = false
+            viaMenu.updateChangeCount(.changeDone)
+            viaMenu.save(nil)
+            try expect(TestSupport.spin { TestSupport.lossySavePrompts.count == 4 }, "File > Save asks too")
+            TestSupport.drain(0.2)
+            try expectEqual(try String(contentsOf: menuURL, encoding: .utf8), "x\ny\r\n")
+        }
+
+        testRunner("TextDocument save on focus lost never prompts about a lossy save") {
+            defaults.set(true, forKey: Pref.saveOnFocusLost)
+            let doc = try makeFileDocument("a\r\nb\n")
+            let url = try unwrap(doc.fileURL)
+            doc.textStorage.mutableString.append("c")
+            doc.updateChangeCount(.changeDone)
+            doc.saveIfWanted()
+            TestSupport.drain(0.2)
+            try expect(TestSupport.lossySavePrompts.isEmpty, "the user is in another window")
+            try expectEqual(try String(contentsOf: url, encoding: .utf8), "a\r\nb\n")
+            try expect(doc.isDocumentEdited)
+        }
+
+        testRunner("TextDocument revert warns before loading a file that grew too large") {
+            let doc = try makeFileDocument("small")
+            let url = try unwrap(doc.fileURL)
+            documentController.largeFileWarningSize = 10
+            try "now much larger than ten bytes".write(to: url, atomically: false, encoding: .utf8)
+            TestSupport.largeFileAnswer = false
+            let error = try expectThrows { try doc.revert(toContentsOf: url, ofType: doc.fileType ?? "") }
+            try expectEqual((error as? CocoaError)?.code, .userCancelled)
+            try expectEqual(TestSupport.largeFilePrompts.count, 1)
+            try expectEqual(doc.textStorage.string, "small")
+
+            TestSupport.largeFileAnswer = true
+            try doc.revert(toContentsOf: url, ofType: doc.fileType ?? "")
+            try expectEqual(doc.textStorage.string, "now much larger than ten bytes")
         }
 
         testRunner("TextDocument reload keeps attributes and clears undo history") {
@@ -243,6 +408,48 @@ public enum TextDocumentTests {
             let info = operation.printInfo
             try expectEqual(view.frame.width, info.paperSize.width - info.leftMargin - info.rightMargin)
             try expect(view.frame.height > 0, "sized to fit its text")
+        }
+
+        testRunner("TextDocument typing after a save marks the document edited again") {
+            let doc = try makeFileDocument("")
+            let url = try unwrap(doc.fileURL)
+            let controller = EditorWindowController()
+            controller.add(doc)
+            controller.showWindow(nil)
+            let pane = try unwrap(controller.selectedPane)
+            let window = try unwrap(controller.window)
+            window.makeKeyAndOrderFront(nil)
+            window.makeFirstResponder(pane.textView)
+
+            // Type the way the keyboard does: one insertText per key, with the run loop turning in between.
+            func type(_ text: String) {
+                for character in text {
+                    pane.textView.insertText(String(character), replacementRange: pane.textView.selectedRange())
+                    TestSupport.drain(0.01)
+                }
+            }
+
+            type("abc")
+            try expect(doc.isDocumentEdited)
+            for operation in ["File > Save", "save on focus lost"] {
+                if operation == "File > Save" {
+                    doc.save(nil)
+                } else {
+                    defaults.set(true, forKey: Pref.saveOnFocusLost)
+                    doc.saveIfWanted()
+                }
+                try expect(TestSupport.spin { !doc.isDocumentEdited }, "\(operation): saved")
+                type("d")
+                try expect(TestSupport.spin { doc.isDocumentEdited }, "\(operation): typing after the save must mark the document edited")
+                try expect(window.isDocumentEdited && window.title.hasPrefix("* "), "\(operation): \(window.title)")
+            }
+            doc.save(nil)
+            try expect(TestSupport.spin { (try? String(contentsOf: url, encoding: .utf8)) == "abcdd" })
+
+            // Undo after a save goes back past it, and marks the document edited.
+            doc.undoManager?.undo()
+            try expectEqual(doc.textStorage.string, "abcd", "the typing after the last save is its own undo step")
+            try expect(doc.isDocumentEdited)
         }
 
         testRunner("TextDocument saveIfWanted saves only an edited, file-backed document with no sheet up") {
