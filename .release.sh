@@ -6,7 +6,7 @@ if [[ -f "./scripts/config.sh" ]]; then
     source "./scripts/config.sh"
 fi
 
-APP_NAME="${APP_NAME:-Minimal Notepad}"
+APP_NAME="${APP_NAME:-Notepad}"
 
 # Pre-release verification command
 TEST_CMD="make test"

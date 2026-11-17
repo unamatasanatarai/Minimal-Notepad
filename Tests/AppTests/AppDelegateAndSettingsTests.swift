@@ -288,7 +288,7 @@ public enum AppDelegateAndSettingsTests {
         testRunner("AppDelegate main menu: structure, shortcuts and wiring") {
             _ = launchedDelegate()
             let mainMenu = try unwrap(NSApp.mainMenu)
-            try expectEqual(mainMenu.items.map { $0.title }, ["Minimal Notepad", "File", "Edit", "Format", "View", "Window", "Help"])
+            try expectEqual(mainMenu.items.map { $0.title }, ["Notepad", "File", "Edit", "Format", "View", "Window", "Help"])
             try expect(NSApp.windowsMenu === mainMenu.item(withTitle: "Window")?.submenu)
             try expect(NSApp.helpMenu === mainMenu.item(withTitle: "Help")?.submenu)
             try expect(NSApp.servicesMenu != nil)
@@ -308,13 +308,13 @@ public enum AppDelegateAndSettingsTests {
                 ("Edit", "Find…", "⌘f"), ("Edit", "Find Next", "⌘g"), ("Edit", "Find Previous", "⇧⌘g"), ("Edit", "Replace…", "⌥⌘f"),
                 ("Edit", "Go to Line…", "⌘l"), ("Format", "Zoom In", "⌘+"), ("Format", "Zoom Out", "⌘-"), ("Format", "Actual Size", "⌘0"),
                 ("View", "Enter Full Screen", "⌃⌘f"), ("Window", "Show Previous Tab", "⇧⌘["), ("Window", "Show Next Tab", "⇧⌘]"),
-                ("Minimal Notepad", "Quit Minimal Notepad", "⌘q"), ("Minimal Notepad", "Settings…", "⌘,"), ("Help", "Minimal Notepad Help", "⌘?")
+                ("Notepad", "Quit Notepad", "⌘q"), ("Notepad", "Settings…", "⌘,"), ("Help", "Notepad Help", "⌘?")
             ]
             for (menu, title, keys) in expected {
                 try expectEqual(shortcut(try item(title, in: menu)), keys, "\(menu) > \(title)")
             }
             try expectEqual(try item("Paste", in: "Edit").action, #selector(NSTextView.pasteAsPlainText(_:)), "paste never brings in formatting")
-            try expectEqual(try item("Quit Minimal Notepad", in: "Minimal Notepad").action, #selector(AppDelegate.quitRequested(_:)))
+            try expectEqual(try item("Quit Notepad", in: "Notepad").action, #selector(AppDelegate.quitRequested(_:)))
 
             let alias = try unwrap(items.first { $0.keyEquivalent == "=" })
             try expect(alias.isHidden && alias.allowsKeyEquivalentWhenHidden, "⌘= zooms in without a visible duplicate")

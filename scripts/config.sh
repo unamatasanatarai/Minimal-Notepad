@@ -4,7 +4,7 @@
 # These variables configure your application name, bundle ID, and build options.
 # Run `make setup` to set the app name and bundle ID, or modify this file directly.
 
-export APP_NAME="${APP_NAME:-Minimal Notepad}"
+export APP_NAME="${APP_NAME:-Notepad}"
 export BUNDLE_ID="${BUNDLE_ID:-com.minimal.notepad}"
 export MIN_MACOS_VERSION="${MIN_MACOS_VERSION:-11.0}"
 export COPYRIGHT="${COPYRIGHT:-Copyright © $(date +%Y) UnamataSanatarai. All rights reserved.}"

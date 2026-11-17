@@ -2,20 +2,20 @@
 import PackageDescription
 
 let package = Package(
-    name: "MinimalNotepad",
+    name: "Notepad",
     platforms: [
         .macOS(.v11)
     ],
     products: [
         .executable(
-            name: "MinimalNotepad",
-            targets: ["MinimalNotepad"]
+            name: "Notepad",
+            targets: ["Notepad"]
         )
     ],
     dependencies: [],
     targets: [
         .executableTarget(
-            name: "MinimalNotepad",
+            name: "Notepad",
             dependencies: [],
             path: "Sources"
         )

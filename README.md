@@ -1,11 +1,11 @@
-# Minimal Notepad
+# Notepad
 
 A lightweight, distraction-free native macOS plain text editor built for immediate launch and frictionless writing without runtime bloat.
 
-Minimal Notepad is a zero-configuration text editor engineered with native AppKit and TextKit 1. It delivers an instant-launch plain text canvas with robust encoding resilience, tabs, search and replace, and native macOS document handling—designed to get out of your way and let you focus entirely on your words and code.
+Notepad is a zero-configuration text editor engineered with native AppKit and TextKit 1. It delivers an instant-launch plain text canvas with robust encoding resilience, tabs, search and replace, and native macOS document handling—designed to get out of your way and let you focus entirely on your words and code.
 
 <p align="center">
-  <img src="Resources/MinimalNotepad.iconset/icon_256x256.png" alt="Minimal Notepad App Icon" width="128" height="128" />
+  <img src="Resources/MinimalNotepad.iconset/icon_256x256.png" alt="Notepad App Icon" width="128" height="128" />
 </p>
 
 <p align="center">
@@ -27,13 +27,13 @@ Minimal Notepad is a zero-configuration text editor engineered with native AppKi
 
 ---
 
-## Why Minimal Notepad?
+## Why Notepad?
 
 Most modern text editors have evolved into massive, resource-heavy application suites. They package entire web browser runtimes, run continuous background telemetry, and burden simple note-taking tasks with complex plugin setups, cloud synchronization prompts, and sluggish cold starts.
 
 When you only need to inspect a log file, jot down immediate thoughts, or manipulate plain text, you shouldn't have to wait for heavy application stacks to load.
 
-**Minimal Notepad solves this by returning to the fundamentals of macOS software engineering:**
+**Notepad solves this by returning to the fundamentals of macOS software engineering:**
 
 * **Zero Startup Delay**: Launches directly into a focused editing buffer without template pickers, workspace selection dialogs, or telemetry handshakes.
 * **Pure Plain Text Purity**: System typography automatically sanitizes incoming rich-text styling, graphics, and smart substitutions to ensure clean ASCII and UTF-8 output.
@@ -86,7 +86,7 @@ Appearance (System / Light / Dark), default line endings, default word wrap, res
 
 ## What Makes It Different
 
-| Characteristic | Minimal Notepad | Electron & Multi-Platform Editors |
+| Characteristic | Notepad | Electron & Multi-Platform Editors |
 | :--- | :--- | :--- |
 | **Engine Architecture** | Native Swift & AppKit (TextKit 1) | Chromium runtime & Node.js subprocesses |
 | **Memory Footprint** | Lightweight single native process | Multi-process browser engine pools |
@@ -127,7 +127,7 @@ Appearance (System / Light / Dark), default line endings, default word wrap, res
 ### Download Prebuilt App
 
 1. Download the latest compiled bundle from [GitHub Releases](https://github.com/unamatasanatarai/Minimal-Notepad/releases/latest).
-2. Move `Minimal Notepad.app` to your `/Applications` directory.
+2. Move `Notepad.app` to your `/Applications` directory.
 3. Open the application.
 
 ---
@@ -158,7 +158,7 @@ Appearance (System / Light / Dark), default line endings, default word wrap, res
    make run
    ```
 
-The compiled binary and macOS app bundle will be placed in `build/Minimal Notepad.app`.
+The compiled binary and macOS app bundle will be placed in `build/Notepad.app`.
 
 To clean up build artifacts:
 ```bash
@@ -169,7 +169,7 @@ make clean
 
 ## Architecture & Technology
 
-Minimal Notepad is constructed as a single-binary AppKit application:
+Notepad is constructed as a single-binary AppKit application:
 
 * **Language**: Swift
 * **Document Model**: AppKit document architecture (`NSDocument`, `NSDocumentController`) with tabs drawn inside a single window

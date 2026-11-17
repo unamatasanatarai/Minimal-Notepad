@@ -263,18 +263,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
         let servicesMenu = menu("Services", [])
         NSApp.servicesMenu = servicesMenu.submenu
-        mainMenu.addItem(menu("Minimal Notepad", [
-            item("About Minimal Notepad", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
+        mainMenu.addItem(menu("Notepad", [
+            item("About Notepad", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
             .separator(),
             item("Settings…", #selector(showSettings(_:)), ","),
             .separator(),
             servicesMenu,
             .separator(),
-            item("Hide Minimal Notepad", #selector(NSApplication.hide(_:)), "h"),
+            item("Hide Notepad", #selector(NSApplication.hide(_:)), "h"),
             item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]),
             item("Show All", #selector(NSApplication.unhideAllApplications(_:))),
             .separator(),
-            item("Quit Minimal Notepad", #selector(quitRequested(_:)), "q")
+            item("Quit Notepad", #selector(quitRequested(_:)), "q")
         ]))
 
         mainMenu.addItem(menu("File", [
@@ -345,10 +345,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         NSApp.windowsMenu = windowMenu.submenu
 
         let helpMenu = menu("Help", [
-            item("Minimal Notepad Help", #selector(openHelp(_:)), "?"),
+            item("Notepad Help", #selector(openHelp(_:)), "?"),
             item("Keyboard Shortcuts", #selector(showKeyboardShortcuts(_:))),
             .separator(),
-            item("About Minimal Notepad", #selector(NSApplication.orderFrontStandardAboutPanel(_:)))
+            item("About Notepad", #selector(NSApplication.orderFrontStandardAboutPanel(_:)))
         ])
         mainMenu.addItem(helpMenu)
         NSApp.helpMenu = helpMenu.submenu
